@@ -1,0 +1,24 @@
+[project]
+name = "simple-or-agent"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "eugeny",email = "esshka@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12,<4"
+dependencies = [
+    "requests>=2.31",
+    "tenacity>=8.2",
+    "python-dotenv>=1.0",
+    "ddgs>=1.0.6",
+    "beautifulsoup4>=4.12",
+]
+
+[tool.poetry]
+packages = [{include = "simple_or_agent", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
