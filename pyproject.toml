@@ -11,7 +11,7 @@ dependencies = [
     "requests>=2.31",
     "tenacity>=8.2",
     "python-dotenv>=1.0",
-    "duckduckgo_search>=6.2",
+    "ddgs>=1.0",
     "beautifulsoup4>=4.12",
 ]
 
