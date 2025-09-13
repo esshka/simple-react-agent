@@ -202,22 +202,41 @@ class OpenRouterClient:
                 return content
             # OpenAI-style list of content parts
             if isinstance(content, list):
-                parts: List[str] = []
-                for p in content:
-                    if isinstance(p, str) and p.strip():
-                        parts.append(p.strip()); continue
-                    if isinstance(p, dict):
-                        t = p.get('text')
-                        if isinstance(t, dict):
-                            t = t.get('value') or t.get('text')
+                def _collect(obj: Any) -> List[str]:  # tolerant collector
+                    out: List[str] = []
+                    if isinstance(obj, str):
+                        s = obj.strip()
+                        return [s] if s else []
+                    if isinstance(obj, dict):
+                        # Common shapes: {type: text|reasoning|output_text, text: str|list}
+                        t = obj.get('text')
                         if isinstance(t, str) and t.strip():
-                            parts.append(t.strip()); continue
-                        for k in ('content', 'value'):
-                            v = p.get(k)
-                            if isinstance(v, str) and v.strip():
-                                parts.append(v.strip()); break
+                            out.append(t.strip())
+                        elif isinstance(t, list):
+                            for it in t:
+                                out.extend(_collect(it))
+                        for k in ('content', 'value', 'message'):
+                            v = obj.get(k)
+                            if v is None:
+                                continue
+                            out.extend(_collect(v))
+                        return out
+                    if isinstance(obj, list):
+                        for it in obj:
+                            out.extend(_collect(it))
+                        return out
+                    return out
+                parts = _collect(content)
                 if parts:
                     return "\n".join(parts)
+            # Some providers return parsed/structured output separate from content
+            parsed = msg.get('parsed')
+            if parsed is not None:
+                import json as _json
+                try:
+                    return _json.dumps(parsed, ensure_ascii=False)
+                except Exception:
+                    return str(parsed)
             # Fallback: summarize tool calls if present
             tc = msg.get('tool_calls') or []
             if tc:

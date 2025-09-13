@@ -1,5 +1,4 @@
 """REAct-style agent abstraction on top of OpenRouterClient (<=300 LOC)."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,7 +14,6 @@ from .openrouter_client import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass
 class ToolSpec:
@@ -35,7 +33,6 @@ class ToolSpec:
                 "parameters": self.parameters,
             },
         }
-
 
 @dataclass
 class AskResult:
@@ -155,10 +152,16 @@ class ReActAgent:
                 raise e
 
             last_resp = resp
-
             # Tool-calling phase (bounded iterations)
             tool_iters = 0
             calls = self.client.get_tool_calls(resp)
+            if calls:
+                try:
+                    m = (resp.get("choices") or [{}])[0].get("message")
+                    if isinstance(m, dict):
+                        messages.append(m)
+                except Exception:
+                    pass
             if not calls:
                 # Fallback: some models emit inline <tools>{...}</tools> blocks in content
                 try:
@@ -217,6 +220,13 @@ class ReActAgent:
                     raise e
                 last_resp = resp
                 calls = self.client.get_tool_calls(resp)
+                if calls:
+                    try:
+                        m = (resp.get("choices") or [{}])[0].get("message")
+                        if isinstance(m, dict):
+                            messages.append(m)
+                    except Exception:
+                        pass
                 if not calls:
                     try:
                         content_for_tools = self.client.extract_content(resp)
