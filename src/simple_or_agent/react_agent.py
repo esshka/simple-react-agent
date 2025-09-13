@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
+import os
 import json
 import logging
 
@@ -58,7 +59,7 @@ class ReActAgent:
     def __init__(
         self,
         client: OpenRouterClient,
-        model: str,
+        model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         keep_history: bool = True,
         temperature: float = 0.1,
@@ -70,7 +71,8 @@ class ReActAgent:
         tool_choice: Optional[Any] = "auto",
     ) -> None:
         self.client = client
-        self.model = model
+        # Default model from env if not provided
+        self.model = model or os.getenv("MODEL_ID", "qwen/qwen3-next-80b-a3b-thinking")
         self.temperature = temperature
         self.keep_history = keep_history
         self.max_rounds = max(1, int(max_rounds))

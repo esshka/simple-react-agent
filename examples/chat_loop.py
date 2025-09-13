@@ -37,7 +37,7 @@ except ModuleNotFoundError:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="OpenRouter chat loop")
-    p.add_argument("--model", default="qwen/qwen3-next-80b-a3b-thinking", help="Model ID")
+    p.add_argument("--model", default=os.getenv("MODEL_ID", "qwen/qwen3-next-80b-a3b-thinking"), help="Model ID")
     p.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature")
     p.add_argument("--max-tokens", type=int, default=None, help="Max tokens in response")
     p.add_argument("--system", type=str, default=None, help="Optional system message")

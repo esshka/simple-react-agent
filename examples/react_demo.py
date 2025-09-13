@@ -35,7 +35,7 @@ from src.simple_or_agent import format_inline_citations  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Deep research via DuckDuckGo + fetch")
     p.add_argument("topic", type=str, help="Research topic or question")
-    p.add_argument("--model", default="qwen/qwen3-next-80b-a3b-thinking", help="Model ID")
+    p.add_argument("--model", default=os.getenv("MODEL_ID", "qwen/qwen3-next-80b-a3b-thinking"), help="Model ID")
     p.add_argument("--max-results", type=int, default=8, help="Max search results per query (3-15)")
     p.add_argument("--fetch-chars", type=int, default=5000, help="Max characters to return from fetched page (1000-15000)")
     p.add_argument("--region", default="us-en", help="DuckDuckGo region (e.g., us-en, uk-en)")
