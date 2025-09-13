@@ -14,7 +14,6 @@ from .openrouter_client import (
 )
 
 logger = logging.getLogger(__name__)
-
 @dataclass
 class ToolSpec:
     """Python-executed tool with JSON schema for LLM tool-calls."""

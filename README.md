@@ -28,7 +28,14 @@ Quick start
 - `poetry run python examples/chat_loop.py --show-reasoning`
 - Flags: `--model`, `--temperature`, `--with-calculator`, `--system`, `--once`, `--prompt`.
 
-4) Run the deep research demo
+4) Run the ReAct chat (with optional web tools)
+- `poetry run python examples/react_chat.py`
+- One-shot: `poetry run python examples/react_chat.py --once --prompt "hello"`
+- Enable web tools: `poetry run python examples/react_chat.py --with-web --show-reasoning`
+- Flags: `--model`, `--temperature`, `--system`, `--reasoning-effort`, `--show-reasoning`, `--no-history`, `--once`, `--prompt`, `--verbose`,
+  and if `--with-web`: `--region`, `--time` (`d`,`w`,`m`,`y`), `--max-results`, `--fetch-chars`.
+
+5) Run the deep research demo
 - `poetry run python examples/react_demo.py "what is BTC trend today?" --time d --max-results 8`
 - The agent uses ddgs search and fetches a few pages, synthesizing a short report with inline citations.
 
@@ -88,6 +95,9 @@ CLI references
 - Chat loop: `examples/chat_loop.py`
   - Interactive, supports a lightweight calculator tool (`--with-calculator`).
   - Optional response schema, system prompts, reasoning, and one-shot mode.
+- ReAct chat: `examples/react_chat.py`
+  - Interactive REAct agent; optionally exposes `web_search` + `fetch_page` via `--with-web`.
+  - Supports multi-round tool use, reasoning display, and history toggling.
 - Research demo: `examples/react_demo.py`
   - ddgs search + HTML fetch, SERP filtering, simple inline citations.
   - Tunables: `--max-results`, `--time` (`d`, `w`, `m`, `y`), `--region`, `--fetch-chars`.
@@ -104,6 +114,10 @@ Notes & limitations
 - `fetch_page` limits text length (default 5000 chars) and strips scripts/styles; some dynamic sites may yield little text.
 - SERP pages are intentionally not fetched to avoid noisy content; the model is nudged to select real articles.
 - This is not a browser/JS runtime; it’s an HTTP fetch + parse flow intended for concise research.
+
+Recent improvements
+- Structured content handling: `extract_content` now tolerates list-based and nested content parts and the `parsed` field from providers.
+- Tool-call flow: the agent now preserves assistant tool-call messages in history, improving multi-round tool reliability.
 
 
 Troubleshooting
