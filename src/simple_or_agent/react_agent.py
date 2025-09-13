@@ -259,36 +259,31 @@ class ReActAgent:
             usage = last_resp.get("usage") if isinstance(last_resp, dict) else None
             return AskResult(content=content, reasoning=reasoning_txt, usage=usage, messages=messages)
 
-    # --- Helpers ---
     def _parse_inline_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Parse inline tool-call tags into synthetic tool_calls.
-
-        Supports:
-        - <tools>{...}</tools>
-        - <tool_call>{...}</tool_call>
-        Where {...} is a JSON object with keys: name, arguments
-        """
+        """Parse <tools>/<tool_call>/<tool> JSON tags and code-fenced JSON."""
         import re
         calls: List[Dict[str, Any]] = []
-        pattern = r"<(tools|tool_call)>\s*(\{.*?\})\s*</\1>"
-        for idx, m in enumerate(re.finditer(pattern, content, re.DOTALL)):
-            js = m.group(2)
+        def _add(obj: Dict[str, Any]) -> None:
+            fn = obj.get("name") or obj.get("tool") or (obj.get("function") or {}).get("name")
+            if not fn:
+                return
+            ar = obj.get("arguments") or obj.get("args") or (obj.get("function") or {}).get("arguments") or {}
+            if not isinstance(ar, (dict, str)):
+                ar = {}
+            ar_s = ar if isinstance(ar, str) else json.dumps(ar, ensure_ascii=False)
+            calls.append({"id": f"inline-{len(calls)}-{fn}", "type": "function", "function": {"name": fn, "arguments": ar_s}})
+        # Tag forms
+        for m in re.finditer(r"<(tools|tool_call|tool)>\s*(\{.*?\})\s*</\1>", content, re.DOTALL):
             try:
-                obj = json.loads(js)
-                name = obj.get("name")
-                args = obj.get("arguments")
-                if not name:
-                    continue
-                if not isinstance(args, (dict, str)):
-                    args = {}
-                args_s = args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
-                calls.append({
-                    "id": f"inline-{idx}-{name}",
-                    "type": "function",
-                    "function": {"name": name, "arguments": args_s},
-                })
+                _add(json.loads(m.group(2)))
             except Exception:
-                continue
+                pass
+        # Code-fenced JSON blocks
+        for m in re.finditer(r"```[a-zA-Z0-9_-]*\s*(\{.*?\})\s*```", content, re.DOTALL):
+            try:
+                _add(json.loads(m.group(1)))
+            except Exception:
+                pass
         return calls
 
 
