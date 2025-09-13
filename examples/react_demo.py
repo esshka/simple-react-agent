@@ -54,9 +54,9 @@ def make_web_search_tool(default_region: str, default_time: str | None, default_
             return {"error": "empty_query"}
 
         try:
-            from ddgs import DDGS  # local import to keep startup fast
+            from duckduckgo_search import DDGS  # local import to keep startup fast
         except Exception as e:
-            return {"error": f"ddgs_import_failed: {e}"}
+            return {"error": f"duckduckgo_search_import_failed: {e}"}
 
         region = str(args.get("region", default_region) or default_region)
         timelimit = args.get("time", default_time)
@@ -65,8 +65,8 @@ def make_web_search_tool(default_region: str, default_time: str | None, default_
 
         out: List[Dict[str, Any]] = []
         try:
-            with DDGS() as ddgs:
-                for r in ddgs.text(query, region=region, safesearch="moderate", timelimit=timelimit, max_results=max_results):
+            with DDGS() as ddg:
+                for r in ddg.text(query, region=region, safesearch="moderate", timelimit=timelimit, max_results=max_results):
                     out.append({
                         "title": r.get("title"),
                         "url": r.get("href"),

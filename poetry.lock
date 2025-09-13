@@ -153,24 +153,24 @@ files = [
 ]
 
 [[package]]
-name = "ddgs"
-version = "9.5.5"
-description = "Dux Distributed Global Search. A metasearch library that aggregates results from diverse web search services."
+name = "duckduckgo-search"
+version = "8.1.1"
+description = "Search for words, documents, images, news, maps and text translation using the DuckDuckGo.com search engine."
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "ddgs-9.5.5-py3-none-any.whl", hash = "sha256:01fc8017a653ad16501bd8ac9fedcd29291f6500b1f8a7e92a916cdad7fc2fa2"},
-    {file = "ddgs-9.5.5.tar.gz", hash = "sha256:9a09aa9ba24173d14321137c8c1bc54040ed0bf3bad956cb2f9feeda77968770"},
+    {file = "duckduckgo_search-8.1.1-py3-none-any.whl", hash = "sha256:f48adbb06626ee05918f7e0cef3a45639e9939805c4fc179e68c48a12f1b5062"},
+    {file = "duckduckgo_search-8.1.1.tar.gz", hash = "sha256:9da91c9eb26a17e016ea1da26235d40404b46b0565ea86d75a9f78cc9441f935"},
 ]
 
 [package.dependencies]
 click = ">=8.1.8"
-lxml = ">=6.0.0"
+lxml = ">=5.3.0"
 primp = ">=0.15.0"
 
 [package.extras]
-dev = ["mypy (>=1.17.1)", "pytest (>=8.4.1)", "pytest-dependency (>=0.6.0)", "ruff (>=0.12.9)"]
+dev = ["mypy (>=1.14.1)", "pytest (>=8.3.4)", "pytest-dependency (>=0.6.0)", "ruff (>=0.9.2)"]
 
 [[package]]
 name = "idna"
@@ -439,4 +439,4 @@ zstd = ["zstandard (>=0.18.0)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4"
-content-hash = "97f07ca20108c014299165d472b5457e66140d9d1c4fef2cdc715e90eb92d868"
+content-hash = "70808525a277afe57785deeb3514446802a9bff1c2bb5e6ecb716b33f35d4cf2"

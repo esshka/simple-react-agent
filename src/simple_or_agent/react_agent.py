@@ -261,11 +261,18 @@ class ReActAgent:
 
     # --- Helpers ---
     def _parse_inline_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Parse <tools>{...}</tools> blocks into synthetic tool_calls."""
+        """Parse inline tool-call tags into synthetic tool_calls.
+
+        Supports:
+        - <tools>{...}</tools>
+        - <tool_call>{...}</tool_call>
+        Where {...} is a JSON object with keys: name, arguments
+        """
         import re
         calls: List[Dict[str, Any]] = []
-        for idx, m in enumerate(re.finditer(r"<tools>\s*(\{.*?\})\s*</tools>", content, re.DOTALL)):
-            js = m.group(1)
+        pattern = r"<(tools|tool_call)>\s*(\{.*?\})\s*</\1>"
+        for idx, m in enumerate(re.finditer(pattern, content, re.DOTALL)):
+            js = m.group(2)
             try:
                 obj = json.loads(js)
                 name = obj.get("name")
