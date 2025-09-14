@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Deep research demo using ddgs (DuckDuckGo) search and simple page fetch.
-
-- Exposes two tools: `web_search` (DuckDuckGo) and `fetch_page` (HTTP + HTML->text).
-- The agent plans, searches, fetches content, and synthesizes findings with citations.
-"""
+"""Deep research via a ReACT agent using ddgs.
+Exposes `web_search` and `fetch_page`; runs Thought→Action→Observation until Final Answer.
+Prints Final Answer (formatted). Use --show-transcript to print the steps."""
 
 from __future__ import annotations
 
@@ -33,6 +31,16 @@ from src.simple_or_agent.openrouter_client import OpenRouterClient  # noqa: E402
 from src.simple_or_agent import format_inline_citations  # noqa: E402
 
 
+def _split_transcript_and_final(text: str) -> tuple[str, str]:
+    """Return (transcript, final_answer_text) using the last 'Final Answer:' marker."""
+    if not isinstance(text, str) or not text:
+        return "", ""
+    i = text.rfind("Final Answer:")
+    if i < 0:
+        return text, ""
+    return text[:i].rstrip(), text[i + len("Final Answer:"):].strip()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Deep research via DuckDuckGo + fetch")
     p.add_argument("topic", type=str, help="Research topic or question")
@@ -44,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default="high", help="Reasoning effort")
     p.add_argument("--verbose", action="store_true", help="Print raw agent usage JSON")
     p.add_argument("--show-reasoning", action="store_true", help="Print model reasoning if present")
+    p.add_argument("--show-transcript", action="store_true", help="Print Thought/Action/Observation transcript")
     return p
 
 
@@ -231,19 +240,13 @@ def main(argv: List[str]) -> int:
     agent = ReActAgent(
         client,
         model=args.model,
-        system_prompt=(
-            "You are a meticulous research assistant. Use web_search to discover diverse, high-quality sources; "
-            "then use fetch_page to extract key passages. Never fetch search engine results pages (SERPs) like Bing/Google/" \
-            "DuckDuckGo — only fetch actual content URLs from web_search results. Plan briefly as bullet points, avoid " \
-            "hallucinations, and cross-check claims. Provide a structured Final Answer with: Key Findings, Evidence with " \
-            "inline citations [1], [2], Counterpoints, Gaps/Limitations, and a Sources list with titles and URLs."
-        ),
+        system_prompt=None,
         keep_history=True,
         temperature=0.1,
         max_rounds=8,
         max_tool_iters=8,
         reasoning_effort=args.reasoning_effort,
-        parallel_tool_calls=True,
+        parallel_tool_calls=False,
     )
 
     # Add tools
@@ -256,12 +259,18 @@ def main(argv: List[str]) -> int:
         "compare viewpoints, and synthesize. Always cite sources inline like [n] and provide the list at the end."
     ).format(topic=args.topic)
 
-    # Ask the agent (multi-round tool calls allowed)
     res = agent.ask(user_prompt)
 
-    # Output (with minimal inline-citation formatting)
+    transcript, final = _split_transcript_and_final(res.content)
     print("assistant>")
-    print(format_inline_citations(res.content))
+    if final:
+        print(format_inline_citations(final))
+    else:
+        # Fallback if no explicit Final Answer was produced
+        print(format_inline_citations(res.content))
+    if args.show_transcript and transcript:
+        print("transcript>")
+        print(transcript)
     if args.show_reasoning and res.reasoning:
         print("reasoning>")
         print(res.reasoning)
