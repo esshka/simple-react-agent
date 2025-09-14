@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Interactive chat using ReActAgent with optional web tools (<=300 LOC).
-
-- Similar to examples/chat_loop.py but leverages ReActAgent for tool use.
-- Optional DuckDuckGo search + page fetch tools via ddgs + BeautifulSoup.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -15,8 +9,8 @@ import sys
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-# Load .env so OPENROUTER_API_KEY is picked up
-try:  # pragma: no cover
+# Load .env if available (optional)
+try:
     from dotenv import load_dotenv  # type: ignore
     load_dotenv()
 except Exception:
@@ -233,15 +227,30 @@ def main(argv: List[str]) -> int:
         agent.add_tool(make_fetch_page_tool(args.fetch_chars))
 
     def run_turn(user_text: str) -> None:
-        res = agent.ask(user_text)
-        print(c_header("assistant>"))
-        print(res.content)
-        if args.show_reasoning and res.reasoning:
-            print(c_header("reasoning>"))
-            print(c_reason(res.reasoning))
-        if args.verbose and res.usage:
-            print(c_header("usage>"))
-            print(json.dumps(res.usage, indent=2))
+        def show(label: str, res) -> None:
+            print(c_header(f"{label}>"))
+            rt = None
+            try:
+                rt = (res.usage or {}).get("reasoning_tokens")
+            except Exception:
+                rt = None
+            if rt is not None:
+                print(f"[reasoning_tokens: {rt}]")
+            if args.show_reasoning and res.reasoning:
+                print(c_reason(res.reasoning))
+            print(res.content)
+            if args.verbose and res.usage:
+                print(c_header("usage>"))
+                print(json.dumps(res.usage, indent=2))
+
+        # 1) Planner emits a plan (no tools)
+        plan_prompt = f"Plan only. Do not solve or compute.\nTask:\n{user_text}\nOutput:\n- 3-7 numbered steps\n- Optional clarifying questions (<=3)"
+        plan_res = agent.plan(plan_prompt)
+        show("planner", plan_res)
+        # 2) Worker executes using the plan (tools allowed)
+        exec_input = f"Task:\n{user_text}\n\nPlan:\n{plan_res.content}\n\nExecute the plan carefully and provide the Final Answer."
+        work_res = agent.work(exec_input)
+        show("worker", work_res)
 
     # One-shot or interactive
     if args.once:
@@ -288,4 +297,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
