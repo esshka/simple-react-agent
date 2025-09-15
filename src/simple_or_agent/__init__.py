@@ -1,9 +1,16 @@
+# src/simple_or_agent/__init__.py
+# Package exports and small utilities.
+# This file centralizes simple helpers and re-exports public clients.
+# RELEVANT FILES: src/simple_or_agent/lmstudio_client.py,src/simple_or_agent/openrouter_client.py,src/simple_or_agent/simple_agent.py
+
 """Package exports and small utilities."""
 
 from __future__ import annotations
 
 import re
 from typing import List
+
+from .lmstudio_client import LMStudioClient
 
 
 def format_inline_citations(text: str) -> str:
@@ -45,4 +52,5 @@ def format_inline_citations(text: str) -> str:
 
 __all__ = [
     "format_inline_citations",
+    "LMStudioClient",
 ]

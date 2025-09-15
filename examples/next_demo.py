@@ -1,21 +1,20 @@
-#!/usr/bin/env python3
-"""Planner + ReACT demo for hard tasks.
+# examples/next_demo.py
+# Demo for NextAgent orchestrated planning and execution.
+# This file exists to showcase scoped memory and focused context passing.
+# RELEVANT FILES: src/simple_or_agent/next_agent.py,src/simple_or_agent/orchestrator.py,src/simple_or_agent/memory.py
 
-- NextAgent first drafts a plan, then executes via ReACT (Thought→Action→Observation).
-- Exposes two tools: web_search (ddgs) and fetch_page (requests + BeautifulSoup).
-"""
+#!/usr/bin/env python3
 
 from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import sys
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-# Load .env if available
+# Optional .env loader
 try:
     from dotenv import load_dotenv  # type: ignore
     load_dotenv()
@@ -29,6 +28,7 @@ if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
 from src.simple_or_agent.openrouter_client import OpenRouterClient  # noqa: E402
+from src.simple_or_agent.lmstudio_client import LMStudioClient  # noqa: E402
 from src.simple_or_agent.next_agent import NextAgent, ToolSpec  # noqa: E402
 from src.simple_or_agent import format_inline_citations  # noqa: E402
 
@@ -36,6 +36,7 @@ from src.simple_or_agent import format_inline_citations  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Planner + ReACT deep-research demo")
     p.add_argument("topic", type=str, help="Research topic or question")
+    p.add_argument("--client", choices=["openrouter", "lmstudio"], default="openrouter", help="Backend client to use")
     p.add_argument("--model", default=os.getenv("MODEL_ID", "qwen/qwen3-next-80b-a3b-thinking"), help="Model ID")
     p.add_argument("--max-results", type=int, default=8, help="Max search results per query (3-15)")
     p.add_argument("--fetch-chars", type=int, default=5000, help="Max characters to return from fetched page (1000-15000)")
@@ -49,31 +50,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+SERP_HOSTS = {"bing.com", "www.bing.com", "google.com", "www.google.com", "duckduckgo.com", "www.duckduckgo.com", "search.yahoo.com", "yahoo.com", "www.yahoo.com", "startpage.com", "www.startpage.com", "yandex.com", "www.yandex.com", "yandex.ru", "www.yandex.ru", "baidu.com", "www.baidu.com"}
+
+
+def _is_serp(url: str) -> bool:
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        if not host:
+            return False
+        if host in SERP_HOSTS:
+            return True
+        if any(seg in (p.path or "").lower() for seg in ("/search", "/html", "/lite")) and (
+            host.endswith("google.com") or host.endswith("bing.com") or host.endswith("duckduckgo.com") or host.endswith("yahoo.com")
+        ):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def make_web_search_tool(default_region: str, default_time: str | None, default_max: int) -> ToolSpec:
-    SERP_HOSTS = {
-        "bing.com", "www.bing.com",
-        "google.com", "www.google.com",
-        "duckduckgo.com", "www.duckduckgo.com",
-        "search.yahoo.com", "yahoo.com", "www.yahoo.com",
-        "startpage.com", "www.startpage.com",
-        "yandex.com", "www.yandex.com", "yandex.ru", "www.yandex.ru",
-        "baidu.com", "www.baidu.com",
-    }
-    def _is_serp(url: str) -> bool:
-        try:
-            p = urlparse(url)
-            host = (p.hostname or "").lower()
-            if not host:
-                return False
-            if host in SERP_HOSTS:
-                return True
-            if any(seg in (p.path or "").lower() for seg in ("/search", "/html", "/lite")) and (
-                host.endswith("google.com") or host.endswith("bing.com") or host.endswith("duckduckgo.com") or host.endswith("yahoo.com")
-            ):
-                return True
-            return False
-        except Exception:
-            return False
     def handler(args: Dict[str, Any]) -> Any:
         query = str(args.get("query", "")).strip()
         if not query:
@@ -111,48 +108,26 @@ def make_web_search_tool(default_region: str, default_time: str | None, default_
     return ToolSpec(name="web_search", description="Search the web via ddgs and return top results (title, url, snippet)", parameters=params, handler=handler)
 
 
+def _extract_text(html: str) -> str:
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+    except Exception:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    parts: List[str] = []
+    for sel in ["h1", "h2", "h3", "p", "li"]:
+        for el in soup.select(sel):
+            text = (el.get_text(" ", strip=True) or "").strip()
+            if text:
+                parts.append(text)
+    text = "\n".join(parts)
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
 def make_fetch_page_tool(default_max_chars: int) -> ToolSpec:
     UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    SERP_HOSTS = {
-        "bing.com", "www.bing.com",
-        "google.com", "www.google.com",
-        "duckduckgo.com", "www.duckduckgo.com",
-        "search.yahoo.com", "yahoo.com", "www.yahoo.com",
-        "startpage.com", "www.startpage.com",
-        "yandex.com", "www.yandex.com", "yandex.ru", "www.yandex.ru",
-        "baidu.com", "www.baidu.com",
-    }
-    def _is_serp(url: str) -> bool:
-        try:
-            p = urlparse(url)
-            host = (p.hostname or "").lower()
-            if not host:
-                return False
-            if host in SERP_HOSTS:
-                return True
-            if any(seg in (p.path or "").lower() for seg in ("/search", "/html", "/lite")) and (
-                host.endswith("google.com") or host.endswith("bing.com") or host.endswith("duckduckgo.com") or host.endswith("yahoo.com")
-            ):
-                return True
-            return False
-        except Exception:
-            return False
-    def _extract_text(html: str) -> str:
-        try:
-            from bs4 import BeautifulSoup  # type: ignore
-        except Exception:
-            return ""
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        parts: List[str] = []
-        for sel in ["h1", "h2", "h3", "p", "li"]:
-            for el in soup.select(sel):
-                text = (el.get_text(" ", strip=True) or "").strip()
-                if text:
-                    parts.append(text)
-        text = "\n".join(parts)
-        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
     def handler(args: Dict[str, Any]) -> Any:
         import requests
         url = str(args.get("url", "")).strip()
@@ -212,13 +187,22 @@ def _extract_plan(content: str) -> str:
 
 def main(argv: List[str]) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Keep logging minimal for a clean demo output
 
     try:
-        client = OpenRouterClient(app_name="next-demo")
+        if args.client == "openrouter":
+            client = OpenRouterClient(app_name="next-demo")
+        else:
+            # Allow raising the LM Studio timeout for slow remote models.
+            # Reads LMSTUDIO_TIMEOUT_S if present, else uses 180s default.
+            lm_timeout = int(os.getenv("LMSTUDIO_TIMEOUT_S", "180"))
+            client = LMStudioClient(timeout_s=lm_timeout)
     except Exception as e:
         print(f"Client init failed: {e}", file=sys.stderr)
-        print("Ensure OPENROUTER_API_KEY is set (optionally via .env).", file=sys.stderr)
+        if args.client == "openrouter":
+            print("Ensure OPENROUTER_API_KEY is set (optionally via .env).", file=sys.stderr)
+        else:
+            print("Check LMSTUDIO_BASE_URL and that LM Studio is reachable.", file=sys.stderr)
         return 2
 
     agent = NextAgent(
@@ -227,7 +211,7 @@ def main(argv: List[str]) -> int:
         planner_system=None,
         keep_history=True,
         temperature=0.1,
-        max_rounds=8,
+        max_rounds=16,
         reasoning_effort=args.reasoning_effort,
     )
     agent.add_tool(make_web_search_tool(default_region=args.region, default_time=args.time, default_max=args.max_results))
@@ -239,14 +223,59 @@ def main(argv: List[str]) -> int:
         "Always cite sources inline like [n] and provide the list at the end."
     ).format(topic=args.topic)
 
-    res = agent.ask(user_prompt)
+    # Live, compact progress printer
+    step_counter = {"n": 0}
+    def progress_cb(event: str, data: Dict[str, Any]) -> None:
+        if event == "plan" and args.show_plan:
+            print("plan>")
+            print((data.get("text") or "").strip(), flush=True)
+            return
+        if event == "think":
+            step_counter["n"] += 1
+            t = (data.get("thought") or "").strip()
+            an = (data.get("action") or {}).get("name") or (data.get("action") or {}).get("type")
+            print(f"step {step_counter['n']} > think>")
+            if t:
+                print(t, flush=True)
+            if an:
+                print(f"action: {an}", flush=True)
+            return
+        if event == "tool":
+            name = data.get("name") or "(missing)"
+            args_d = data.get("args") or {}
+            try:
+                import json as _json
+                args_s = _json.dumps(args_d, ensure_ascii=False)
+            except Exception:
+                args_s = str(args_d)
+            if len(args_s) > 600:
+                args_s = args_s[:600] + "..."
+            print(f"step {step_counter['n']} > tool>")
+            print(f"{name} args: {args_s}", flush=True)
+            return
+        if event == "observe":
+            act = data.get("action") or {}
+            if (act.get("type") or "").strip().lower() == "finish":
+                return
+            print(f"step {step_counter['n']} > observation>")
+            print(str(data.get("observation") or "").strip(), flush=True)
+            return
+        if event == "judge":
+            if data.get("decision") == "final":
+                print(f"step {step_counter['n']} > final>")
+                txt = (data.get("final") or "").strip()
+                if txt:
+                    print(txt, flush=True)
+            else:
+                print(f"step {step_counter['n']} > continue>", flush=True)
+            return
+
+    res = agent.ask(user_prompt, progress_cb=progress_cb)
 
     transcript, final = _split_transcript_and_final(res.content)
     plan = _extract_plan(res.content)
 
-    if args.show_plan and plan:
-        print("plan>")
-        print(plan)
+    # Plan already printed during progress if --show-plan
     print("assistant>")
     print(format_inline_citations(final or res.content))
     if args.show_transcript and transcript:
@@ -265,4 +294,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
