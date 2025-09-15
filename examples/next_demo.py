@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Planner + ReACT demo for hard tasks.
+
+- NextAgent first drafts a plan, then executes via ReACT (Thought→Action→Observation).
+- Exposes two tools: web_search (ddgs) and fetch_page (requests + BeautifulSoup).
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -9,7 +15,7 @@ import sys
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-# Load .env if available (optional)
+# Load .env if available
 try:
     from dotenv import load_dotenv  # type: ignore
     load_dotenv()
@@ -22,27 +28,24 @@ root = pathlib.Path(__file__).resolve().parents[1]
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
-from src.simple_or_agent.openrouter_client import OpenRouterClient, OpenRouterError  # noqa: E402
+from src.simple_or_agent.openrouter_client import OpenRouterClient  # noqa: E402
 from src.simple_or_agent.next_agent import NextAgent, ToolSpec  # noqa: E402
+from src.simple_or_agent import format_inline_citations  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Interactive chat with NextAgent (Planner + ReACT)")
+    p = argparse.ArgumentParser(description="Planner + ReACT deep-research demo")
+    p.add_argument("topic", type=str, help="Research topic or question")
     p.add_argument("--model", default=os.getenv("MODEL_ID", "qwen/qwen3-next-80b-a3b-thinking"), help="Model ID")
-    p.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature")
-    p.add_argument("--planner-system", type=str, default=None, help="Optional planner system override")
-    p.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None, help="Enable and set reasoning effort")
-    p.add_argument("--show-reasoning", action="store_true", help="Print model reasoning if available")
-    p.add_argument("--no-history", action="store_true", help="Do not keep conversation history between turns")
-    p.add_argument("--once", action="store_true", help="Run a single turn and exit (requires --prompt)")
-    p.add_argument("--prompt", type=str, default=None, help="One-shot user input for --once mode")
-    p.add_argument("--verbose", action="store_true", help="Log raw responses and usage")
-    # Optional web tools
-    p.add_argument("--with-web", action="store_true", help="Enable web_search and fetch_page tools")
-    p.add_argument("--region", default="us-en", help="DuckDuckGo region (us-en, uk-en, ...) for web_search")
-    p.add_argument("--time", default=None, help="Time filter: d,w,m,y (or omit)")
     p.add_argument("--max-results", type=int, default=8, help="Max search results per query (3-15)")
     p.add_argument("--fetch-chars", type=int, default=5000, help="Max characters to return from fetched page (1000-15000)")
+    p.add_argument("--region", default="us-en", help="DuckDuckGo region (e.g., us-en, uk-en)")
+    p.add_argument("--time", default=None, help="DuckDuckGo time limit (d,w,m,y). Omit for any time.")
+    p.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default="high", help="Reasoning effort")
+    p.add_argument("--show-plan", action="store_true", help="Print the generated plan")
+    p.add_argument("--show-transcript", action="store_true", help="Print the Thought/Action/Observation transcript")
+    p.add_argument("--show-reasoning", action="store_true", help="Print model reasoning if present")
+    p.add_argument("--verbose", action="store_true", help="Print raw usage JSON")
     return p
 
 
@@ -105,7 +108,7 @@ def make_web_search_tool(default_region: str, default_time: str | None, default_
         "required": ["query"],
         "additionalProperties": False,
     }
-    return ToolSpec(name="web_search", description="Search the web via ddgs (DuckDuckGo) and return top results (title, url, snippet)", parameters=params, handler=handler)
+    return ToolSpec(name="web_search", description="Search the web via ddgs and return top results (title, url, snippet)", parameters=params, handler=handler)
 
 
 def make_fetch_page_tool(default_max_chars: int) -> ToolSpec:
@@ -145,10 +148,11 @@ def make_fetch_page_tool(default_max_chars: int) -> ToolSpec:
         parts: List[str] = []
         for sel in ["h1", "h2", "h3", "p", "li"]:
             for el in soup.select(sel):
-                t = (el.get_text(" ", strip=True) or "").strip()
-                if t:
-                    parts.append(t)
-        return "\n".join(line.strip() for line in "\n".join(parts).splitlines() if line.strip())
+                text = (el.get_text(" ", strip=True) or "").strip()
+                if text:
+                    parts.append(text)
+        text = "\n".join(parts)
+        return "\n".join(line.strip() for line in text.splitlines() if line.strip())
     def handler(args: Dict[str, Any]) -> Any:
         import requests
         url = str(args.get("url", "")).strip()
@@ -187,107 +191,78 @@ def make_fetch_page_tool(default_max_chars: int) -> ToolSpec:
     return ToolSpec(name="fetch_page", description="Fetch a web page and return cleaned text (capped by max_chars)", parameters=params, handler=handler)
 
 
+def _split_transcript_and_final(text: str) -> tuple[str, str]:
+    if not isinstance(text, str) or not text:
+        return "", ""
+    i = text.rfind("Final Answer:")
+    if i < 0:
+        return text, ""
+    return text[:i].rstrip(), text[i + len("Final Answer:"):].strip()
+
+
+def _extract_plan(content: str) -> str:
+    if not content.startswith("Plan\n"):
+        return ""
+    # Split first double newline after Plan section
+    sep = content.find("\n\n")
+    if sep == -1:
+        return content[len("Plan\n"):].strip()
+    return content[len("Plan\n"):sep].strip()
+
+
 def main(argv: List[str]) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    def supports_color() -> bool:
-        if os.environ.get("NO_COLOR"):
-            return False
-        try:
-            return sys.stdout.isatty()
-        except Exception:
-            return False
-    USE_COLOR = supports_color()
-    def color(s: str, code: str) -> str:
-        return f"\033[{code}m{s}\033[0m" if USE_COLOR else s
-    c_header = lambda s: color(s, "95;1")  # noqa: E731
-    c_reason = lambda s: color(s, "33")    # noqa: E731
-
     try:
-        client = OpenRouterClient(app_name="react-chat")
-    except OpenRouterError as e:
-        print(f"Client error: {e}", file=sys.stderr)
+        client = OpenRouterClient(app_name="next-demo")
+    except Exception as e:
+        print(f"Client init failed: {e}", file=sys.stderr)
         print("Ensure OPENROUTER_API_KEY is set (optionally via .env).", file=sys.stderr)
         return 2
 
     agent = NextAgent(
         client,
         model=args.model,
-        planner_system=args.planner_system,
-        keep_history=not args.no_history,
-        temperature=args.temperature,
+        planner_system=None,
+        keep_history=True,
+        temperature=0.1,
         max_rounds=8,
         reasoning_effort=args.reasoning_effort,
     )
-    if args.with_web:
-        agent.add_tool(make_web_search_tool(args.region, args.time, args.max_results))
-        agent.add_tool(make_fetch_page_tool(args.fetch_chars))
+    agent.add_tool(make_web_search_tool(default_region=args.region, default_time=args.time, default_max=args.max_results))
+    agent.add_tool(make_fetch_page_tool(default_max_chars=args.fetch_chars))
 
-    def run_turn(user_text: str) -> None:
-        def show(label: str, res) -> None:
-            print(c_header(f"{label}>"))
-            rt = None
-            try:
-                rt = (res.usage or {}).get("reasoning_tokens")
-            except Exception:
-                rt = None
-            if rt is not None:
-                print(f"[reasoning_tokens: {rt}]")
-            if args.show_reasoning and res.reasoning:
-                print(c_reason(res.reasoning))
-            print(res.content)
-            if args.verbose and res.usage:
-                print(c_header("usage>"))
-                print(json.dumps(res.usage, indent=2))
+    user_prompt = (
+        "Research this topic in depth: \"{topic}\". "
+        "Search broadly, fetch key sources, extract critical facts and quotes, compare viewpoints, and synthesize. "
+        "Always cite sources inline like [n] and provide the list at the end."
+    ).format(topic=args.topic)
 
-        # 1) Planner emits a plan (no tools)
-        plan_res = agent.plan(user_text)
-        show("planner", plan_res)
-        # 2) ReACT executor runs tools and solves the task
-        react_res = agent.execute_with_plan(user_text, plan_res.content)
-        show("react", react_res)
+    res = agent.ask(user_prompt)
 
-    # One-shot or interactive
-    if args.once:
-        if not args.prompt:
-            print("--once requires --prompt", file=sys.stderr)
-            return 2
-        try:
-            run_turn(args.prompt)
-        finally:
-            client.close()
-        return 0
+    transcript, final = _split_transcript_and_final(res.content)
+    plan = _extract_plan(res.content)
 
-    print("NextAgent chat. Type /exit to quit, /reset to clear history.")
-    try:
-        while True:
-            try:
-                user_text = input("you> ")
-            except EOFError:
-                print()
-                break
-            except KeyboardInterrupt:
-                print()
-                break
-            cmd = user_text.strip().lower()
-            if cmd in {"/exit", ":q", ":wq", "/quit"}:
-                break
-            if cmd == "/reset":
-                agent.reset()
-                print("[history cleared]")
-                continue
-            if not user_text.strip():
-                continue
-            try:
-                run_turn(user_text)
-            except KeyboardInterrupt:
-                print()
-                break
-    finally:
-        client.close()
+    if args.show_plan and plan:
+        print("plan>")
+        print(plan)
+    print("assistant>")
+    print(format_inline_citations(final or res.content))
+    if args.show_transcript and transcript:
+        print("transcript>")
+        print(transcript)
+    if args.show_reasoning and res.reasoning:
+        print("reasoning>")
+        print(res.reasoning)
+    if args.verbose:
+        print("usage>")
+        print(json.dumps(res.usage or {}, indent=2))
+
+    client.close()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
+
