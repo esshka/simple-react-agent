@@ -1,12 +1,12 @@
-# simple-or-agent
+# Simple Agent
 
-A small, focused ReAct-style agent built on top of OpenRouter. It exposes a minimal API, a tiny research demo with web tooling, and an interactive chat loop — all designed to stay readable and modular.
+A small, focused set of agents built on top of OpenRouter.  It includes a minimal client, a ReACT agent, and a planner+executor agent, with simple examples.
 
 Key points
 - Minimal: small modules, simple defaults, under-300‑LOC guideline per file.
 - Reliable: automatic retries/backoff, robust response parsing, error surfacing.
 - Tools: ddgs web search and HTTP page fetch with basic HTML→text extraction.
-- ReAct: plan-then-act loop with tool calling, optional multi-round reasoning.
+- ReACT: plan-then-act loop with tool calling, optional multi-round reasoning.
 - LLM-friendly: clear system prompts and tool schemas for better tool use.
 
 
@@ -49,10 +49,32 @@ How it works
   - Supports tool-calls (function calling), optional parallel calls, and bounded tool iterations.
 - Tools in the demo (`examples/react_demo.py`):
   - `web_search` via `ddgs` (DuckDuckGo). Returns title/url/snippet tuples.
-  - `fetch_page` via `requests` + `beautifulsoup4`. Extracts readable text (caps length).
+ - `fetch_page` via `requests` + `beautifulsoup4`. Extracts readable text (caps length).
   - SERP safety: search engine result pages (Google/Bing/DDG/Yahoo) are filtered or blocked from fetches.
 - Utility (`src/simple_or_agent/__init__.py`):
   - `format_inline_citations(text)` adds simple `[n]` markers for bare URLs and appends a Sources section (used by the demo output).
+ - NextAgent (`src/simple_or_agent/next_agent.py`):
+   - First creates a short plan.  Then executes via ReACT.  Useful for deeper tasks and research.
+
+
+Agent types
+
+- SimpleAgent: a single chat loop with optional function tools.  Keeps history if you want.
+
+- ReActAgent: Thinker → Operator → Validator.  The model plans a single next action, you execute tools locally, and a small judge decides whether to finish.
+
+- NextAgent: Planner + ReACT.  It writes a short, focused plan with assumptions and risks.  Then it runs ReACT to solve the task.
+
+
+ReACT in this repo
+
+- Thought: the model explains the next step.  It is short and focused.
+
+- Action: either call a tool with JSON arguments, or finish with an answer.
+
+- Observation: the local tool runs.  The output is fed back into the loop.
+
+This repeats for a few steps.  A validator decides when to stop and produce the final answer.
 
 
 Programmatic use
@@ -90,6 +112,21 @@ res = agent.ask("Find recent coverage of AI safety news")
 print(res.content)
 ```
 
+NextAgent example
+```python
+from src.simple_or_agent.openrouter_client import OpenRouterClient
+from src/simple_or_agent.next_agent import NextAgent, ToolSpec
+
+client = OpenRouterClient(app_name="next-agent")
+agent = NextAgent(client, model="qwen/qwen3-next-80b-a3b-thinking", reasoning_effort="high")
+
+# Optional: add tools (web_search, fetch_page). See examples/react_chat.py.
+
+plan_res = agent.plan("Research top 3 approaches to LLM agent reliability.")
+exec_res = agent.execute_with_plan("Research top 3 approaches to LLM agent reliability.", plan_res.content)
+print(exec_res.content)
+```
+
 
 CLI references
 - Chat loop: `examples/chat_loop.py`
@@ -98,6 +135,8 @@ CLI references
 - ReAct chat: `examples/react_chat.py`
   - Interactive REAct agent; optionally exposes `web_search` + `fetch_page` via `--with-web`.
   - Supports multi-round tool use, reasoning display, and history toggling.
+- Next demo: `examples/next_demo.py`
+  - Plan first, then execute via ReACT.  Good for deeper research tasks.
 - Research demo: `examples/react_demo.py`
   - ddgs search + HTML fetch, SERP filtering, simple inline citations.
   - Tunables: `--max-results`, `--time` (`d`, `w`, `m`, `y`), `--region`, `--fetch-chars`.
@@ -131,6 +170,8 @@ Troubleshooting
 Project layout
 - `src/simple_or_agent/openrouter_client.py` — OpenRouter wrapper + helpers
 - `src/simple_or_agent/react_agent.py` — ReAct loop and tool execution
+- `src/simple_or_agent/next_agent.py` — Planner + ReACT orchestration
 - `src/simple_or_agent/__init__.py` — small utilities (inline citations)
 - `examples/chat_loop.py` — interactive chat CLI
 - `examples/react_demo.py` — web research demo (ddgs + fetch)
+ - `examples/next_demo.py` — demo for NextAgent (plan + ReACT)
