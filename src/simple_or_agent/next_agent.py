@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from .openrouter_client import OpenRouterClient, OpenRouterError
 from .simple_agent import SimpleAgent, ToolSpec, AskResult
@@ -106,6 +106,22 @@ class NextAgent:
         messages: List[Dict[str, Any]] = (plan_res.messages or []) + (exec_res.messages or [])
         return AskResult(content=content, reasoning=exec_res.reasoning, usage=exec_res.usage, messages=messages)
 
+    # Utilities
+    @staticmethod
+    def split_transcript_and_final(text: str) -> Tuple[str, str]:
+        """Return (transcript, final_answer_text) using the last 'Final Answer:' marker.
+
+        - If not found, returns (text, "").
+        - Trims surrounding whitespace from both parts.
+        """
+        if not isinstance(text, str) or not text:
+            return "", ""
+        i = text.rfind("Final Answer:")
+        if i < 0:
+            return text, ""
+        transcript = text[:i].rstrip()
+        final = text[i + len("Final Answer:"):].strip()
+        return transcript, final
+
 
 __all__ = ["ToolSpec", "AskResult", "NextAgent"]
-
