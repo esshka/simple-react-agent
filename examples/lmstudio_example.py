@@ -52,7 +52,10 @@ def main() -> None:
         print("If LM Studio runs remotely, bind to 0.0.0.0 and open port 1234.\n")
         sys.exit(2)
 
-    with LMStudioClient(base_url=base_url) as client:
+    # Optional: override timeout via LMSTUDIO_TIMEOUT_S
+    timeout_s = int(os.getenv("LMSTUDIO_TIMEOUT_S", "60"))
+
+    with LMStudioClient(base_url=base_url, timeout_s=timeout_s) as client:
         resp = client.chat_completions(model=model, messages=messages, temperature=0.7)
         print(client.extract_content(resp))
 

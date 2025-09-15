@@ -21,19 +21,27 @@ class LMStudioAPIError(LMStudioError):
 
 class LMStudioClient:
     """Chat completions client with retry/backoff and basic helpers."""
-    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, timeout_s: int = 30, max_retries: int = 3, retry_base_wait: int = 1, retry_max_wait: int = 30):
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, timeout_s: int = 180, max_retries: int = 3, retry_base_wait: int = 1, retry_max_wait: int = 30):
         # Resolve base URL; ensure it ends with /v1
         url = (base_url or os.getenv("LMSTUDIO_BASE_URL") or "http://192.168.1.157:1234").rstrip("/")
         self.base_url = url if url.endswith("/v1") else f"{url}/v1"
         # API key is optional for local LM Studio
         self.api_key = api_key or os.getenv("LMSTUDIO_API_KEY")
-        self.timeout_s, self.max_retries = timeout_s, max_retries
+        # Timeout can be overridden via LMSTUDIO_TIMEOUT_S.
+        _env_to = os.getenv("LMSTUDIO_TIMEOUT_S")
+        try:
+            self.timeout_s = int(_env_to) if _env_to else int(timeout_s)
+        except Exception:
+            self.timeout_s = int(timeout_s)
+        self.max_retries = max_retries
         self.retry_base_wait, self.retry_max_wait = retry_base_wait, retry_max_wait
         self.session = requests.Session()
-        self.session.headers.update({"Content-Type": "application/json"})
+        # Some local servers behave poorly with long-lived keep-alive.
+        # Use Connection: close to prefer fresh connections per request.
+        self.session.headers.update({"Content-Type": "application/json", "Connection": "close"})
         if self.api_key:
             self.session.headers["Authorization"] = f"Bearer {self.api_key}"
-        logger.info(f"Initialized LMStudio client at {self.base_url} with {max_retries} retries, {timeout_s}s timeout")
+        logger.info(f"Initialized LMStudio client at {self.base_url} with {max_retries} retries, {self.timeout_s}s timeout")
 
     def _post_once(self, url: str, data: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -76,9 +84,9 @@ class LMStudioClient:
             after=after_log(logger, logging.INFO),
             reraise=True,
         )
-        for _ in retryer:
-            return self._post_once(url, payload)
-        raise LMStudioAPIError("Exhausted retries without a response")
+        for attempt in retryer:
+            with attempt:
+                return self._post_once(url, payload)
 
     def chat_completions(self, model: str, messages: List[Dict[str, Any]], temperature: float = 0.7, max_tokens: Optional[int] = None, response_format: Optional[Dict[str, Any]] = None, reasoning: Optional[Dict[str, Any]] = None, tools: Optional[List[Dict[str, Any]]] = None, tool_choice: Optional[str | Dict[str, Any]] = None, parallel_tool_calls: Optional[bool] = None, **kwargs: Any) -> Dict[str, Any]:
         if not isinstance(messages, list) or not messages:
@@ -103,6 +111,37 @@ class LMStudioClient:
                 u = data['usage']; logger.info(f"Request completed. Tokens - prompt: {u.get('prompt_tokens')}, completion: {u.get('completion_tokens')}, total: {u.get('total_tokens')}")
         except Exception: pass
         return data
+
+    # Compatibility layer with OpenRouterClient API expected by agents.
+    def complete_chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        response_format: Optional[Dict[str, Any]] = None,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        reasoning: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        parallel_tool_calls: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Alias matching OpenRouterClient.complete_chat signature.
+
+        Agents written for OpenRouterClient can call this without changes.
+        """
+        return self.chat_completions(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            reasoning=reasoning,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            **kwargs,
+        )
 
     def extract_content(self, response: Dict[str, Any]) -> str:
         """Return assistant text content, tolerating structured formats."""
