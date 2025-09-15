@@ -1,299 +1,299 @@
-"""REAct-style agent abstraction on top of OpenRouterClient (<=300 LOC)."""
 from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
-import os
 import json
-import logging
+import re
+from typing import Any, Dict, Optional, List, Tuple
 
-from .openrouter_client import (
-    OpenRouterClient,
-    OpenRouterError,
-    OpenRouterAPIError,
-)
+from .openrouter_client import OpenRouterClient, OpenRouterError
+from .simple_agent import SimpleAgent, ToolSpec, AskResult
 
-logger = logging.getLogger(__name__)
-@dataclass
-class ToolSpec:
-    """Python-executed tool with JSON schema for LLM tool-calls."""
-
-    name: str
-    description: str
-    parameters: Dict[str, Any]
-    handler: Callable[[Dict[str, Any]], Any]
-
-    def to_openrouter(self) -> Dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
-        }
+# ---- Core data structures ----
 
 @dataclass
-class AskResult:
-    """Outcome of a single ask() REAct run."""
-
-    content: str
-    reasoning: Optional[str]
-    usage: Optional[Dict[str, Any]]
-    messages: List[Dict[str, Any]]
+class ActionSpec:
+    type: str  # "tool" | "finish"
+    name: Optional[str] = None
+    args: Optional[Dict[str, Any]] = None
+    say: Optional[str] = None
 
 
-class ReActAgent:
-    """Plan-then-Act loop with optional tool-calling."""
+@dataclass
+class ReActStep:
+    thought: str
+    action: ActionSpec
+    observation: str
+
+
+# ---- Thinker, Operator, Validator ----
+
+class ThinkerAgent:
+    """LLM that produces the next Thought and an Action plan (no execution)."""
 
     DEFAULT_SYSTEM = (
-        "You are an expert assistant that uses a Plan-then-Act approach. "
-        "Start with a brief Plan as bullet points. When needed, call tools to gather facts. "
-        "Reflect briefly if a step changes your plan. Provide the Final Answer last."
+        "You are Thinker. Plan one next action using tools when helpful.\n"
+        "Follow this exact format:\n"
+        "Thought: <your step-by-step reasoning for what to do next>\n"
+        "Action: ```json\n{\n  \"type\": \"tool|finish\",\n  \"name\": \"<tool_name_if_type_tool>\",\n  \"args\": { /* JSON args if tool */ },\n  \"say\": \"very short description of the action\"\n}\n```\n"
+        "- Never include Observation.\n- Never execute tools.\n- If you believe the task is solved, use type=finish and put the draft answer in say."
     )
 
     def __init__(
         self,
         client: OpenRouterClient,
-        model: Optional[str] = None,
-        system_prompt: Optional[str] = None,
+        model: Optional[str],
+        temperature: float,
+        reasoning_effort: Optional[str],
         keep_history: bool = True,
-        temperature: float = 0.1,
-        max_rounds: int = 6,
-        max_tool_iters: int = 3,
-        response_format: Optional[Dict[str, Any]] = None,
-        reasoning_effort: Optional[str] = None,
-        parallel_tool_calls: Optional[bool] = None,
-        tool_choice: Optional[Any] = "auto",
     ) -> None:
-        self.client = client
-        # Default model from env if not provided
-        self.model = model or os.getenv("MODEL_ID", "qwen/qwen3-next-80b-a3b-thinking")
-        self.temperature = temperature
-        self.keep_history = keep_history
-        self.max_rounds = max(1, int(max_rounds))
-        self.max_tool_iters = max(0, int(max_tool_iters))
-        self.response_format = response_format
-        self.reasoning_effort = reasoning_effort
-        self.parallel_tool_calls = parallel_tool_calls
-        self.tool_choice = tool_choice
+        self.agent = SimpleAgent(
+            client,
+            model=model,
+            system_prompt=self.DEFAULT_SYSTEM,
+            keep_history=keep_history,
+            temperature=temperature,
+            max_rounds=4,
+            max_tool_iters=0,
+            response_format=None,
+            reasoning_effort=reasoning_effort,
+            parallel_tool_calls=False,
+            tool_choice="none",
+            inline_tools=False,
+        )
 
-        self.system_prompt = system_prompt or self.DEFAULT_SYSTEM
-        self._messages: List[Dict[str, Any]] = []
-        if self.system_prompt:
-            self._messages.append({"role": "system", "content": self.system_prompt})
+    def propose(self, goal: str, tools_catalog: str, history_text: str) -> Tuple[str, ActionSpec, AskResult]:
+        prompt = (
+            f"Goal:\n{goal}\n\n"
+            f"Tools (name, description, JSON params):\n{tools_catalog or '(none)'}\n\n"
+            f"History so far (Thought/Action/Observation per step):\n{history_text or '(none)'}\n\n"
+            "Propose only the next Thought and Action per the required format."
+        )
+        res = self.agent.ask(prompt)
+        thought, action = self._parse_thought_and_action(res.content)
+        return thought, action, res
 
+    @staticmethod
+    def _parse_thought_and_action(text: str) -> Tuple[str, ActionSpec]:
+        thought = ""
+        # Thought: capture until Action:
+        m = re.search(r"Thought:\s*(.*?)(?:\n\s*Action:|$)", text, re.DOTALL | re.IGNORECASE)
+        if m:
+            thought = m.group(1).strip()
+        # Action JSON block
+        action_obj: Dict[str, Any] = {}
+        jm = re.search(r"Action:\s*```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        if jm:
+            raw = jm.group(1)
+            try:
+                action_obj = json.loads(raw)
+            except Exception:
+                action_obj = {}
+        else:
+            # Fallback: try to find a JSON object anywhere
+            jm2 = re.search(r"\{[\s\S]*\}", text)
+            if jm2:
+                try:
+                    action_obj = json.loads(jm2.group(0))
+                except Exception:
+                    action_obj = {}
+            else:
+                # Very weak fallback: try to read a simple 'finish' directive
+                if re.search(r"\bfinish\b", text, re.IGNORECASE):
+                    action_obj = {"type": "finish"}
+        a_type = str(action_obj.get("type", "")).strip().lower() if isinstance(action_obj, dict) else ""
+        name = action_obj.get("name") if isinstance(action_obj, dict) else None
+        args = action_obj.get("args") if isinstance(action_obj, dict) else None
+        say = action_obj.get("say") if isinstance(action_obj, dict) else None
+        if a_type not in ("tool", "finish"):
+            # Default to tool if looks like a tool name is present
+            a_type = "tool" if name else "finish"
+        if not isinstance(args, dict):
+            args = {}
+        return thought, ActionSpec(type=a_type, name=name, args=args, say=say)
+
+
+class OperatorAgent:
+    """Executes actions using registered ToolSpec handlers and returns Observation text."""
+
+    def __init__(self) -> None:
         self._tools: Dict[str, ToolSpec] = {}
 
-    # Memory management
-    def reset(self) -> None:
-        """Clear conversation history while keeping the system prompt."""
-        self._messages = []
-        if self.system_prompt:
-            self._messages.append({"role": "system", "content": self.system_prompt})
-
-    # Tools
     def add_tool(self, tool: ToolSpec) -> None:
-        if not tool.name or not callable(tool.handler):
-            raise OpenRouterError("Tool must have a name and a callable handler")
         self._tools[tool.name] = tool
 
     def remove_tool(self, name: str) -> None:
         self._tools.pop(name, None)
 
-    def _tool_list_for_api(self) -> Optional[List[Dict[str, Any]]]:
+    def tool_catalog(self) -> str:
         if not self._tools:
-            return None
-        return [t.to_openrouter() for t in self._tools.values()]
+            return ""
+        parts: List[str] = []
+        for t in self._tools.values():
+            try:
+                params = json.dumps(t.parameters, ensure_ascii=False)
+            except Exception:
+                params = "{}"
+            parts.append(f"- {t.name}: {t.description}\n  params: {params}")
+        return "\n".join(parts)
 
-    # Core loop
-    def ask(self, prompt: str) -> AskResult:
-        """Run a REAct loop for a single user prompt.
+    def execute(self, action: ActionSpec) -> str:
+        if action.type == "finish":
+            return action.say or "finish"
+        if action.type != "tool":
+            return "error: unknown_action_type"
+        if not action.name:
+            return "error: missing_tool_name"
+        tool = self._tools.get(action.name)
+        if not tool:
+            return f"error: unknown_tool {action.name}"
+        try:
+            out = tool.handler(action.args or {})
+            if isinstance(out, str):
+                return out
+            return json.dumps(out, ensure_ascii=False)
+        except Exception as e:
+            return f"error: {e}"
 
-        Returns the final assistant content and metadata. Conversation
-        history is retained unless keep_history=False.
-        """
+
+class ValidatorAgent:
+    """LLM that decides whether to continue or provide the Final Answer."""
+
+    DEFAULT_SYSTEM = (
+        "You are Validator. Given the goal and the latest step (Thought/Action/Observation), decide if the task is solved.\n"
+        "Respond with exactly one of:\n"
+        "- 'Decision: continue' (optionally followed by one short feedback line), or\n"
+        "- 'Final Answer: <complete, concise final answer>'\n"
+        "Do not invent new observations or call tools."
+    )
+
+    def __init__(
+        self,
+        client: OpenRouterClient,
+        model: Optional[str],
+        temperature: float,
+        reasoning_effort: Optional[str],
+        keep_history: bool = True,
+    ) -> None:
+        self.agent = SimpleAgent(
+            client,
+            model=model,
+            system_prompt=self.DEFAULT_SYSTEM,
+            keep_history=keep_history,
+            temperature=temperature,
+            max_rounds=4,
+            max_tool_iters=0,
+            response_format=None,
+            reasoning_effort=reasoning_effort,
+            parallel_tool_calls=False,
+            tool_choice="none",
+            inline_tools=False,
+        )
+
+    def judge(self, goal: str, last_step_text: str, transcript: str) -> Tuple[bool, str, AskResult]:
+        prompt = (
+            f"Goal:\n{goal}\n\n"
+            f"Transcript so far:\n{transcript}\n\n"
+            f"Latest step:\n{last_step_text}\n\n"
+            "Return either 'Decision: continue' or 'Final Answer: ...'"
+        )
+        res = self.agent.ask(prompt)
+        text = res.content.strip()
+        # Parse decision
+        m_final = re.search(r"^\s*Final\s+Answer:\s*(.*)$", text, re.IGNORECASE | re.DOTALL)
+        if m_final:
+            return True, m_final.group(1).strip(), res
+        m_cont = re.search(r"^\s*Decision:\s*continue\b", text, re.IGNORECASE)
+        if m_cont:
+            return False, "", res
+        # Fallback: if neither matched, assume continue with feedback
+        return False, "", res
+
+
+# ---- Orchestrator ----
+
+class ReActAgent:
+    """Implements a simple ReACT loop using Thinker, Operator, and Validator agents."""
+
+    def __init__(
+        self,
+        client: OpenRouterClient,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,  # ignored for ReACT; kept for API compatibility
+        keep_history: bool = True,
+        temperature: float = 0.1,
+        max_rounds: int = 6,
+        max_tool_iters: int = 3,  # ignored here; kept for API compatibility
+        response_format: Optional[Dict[str, Any]] = None,  # unused here
+        reasoning_effort: Optional[str] = None,
+        parallel_tool_calls: Optional[bool] = None,  # unused here
+        tool_choice: Optional[Any] = "auto",  # unused here
+        planner_system: Optional[str] = None,  # unused here
+    ) -> None:
+        # Core sub-agents
+        self.thinker = ThinkerAgent(client, model=model, temperature=temperature, reasoning_effort=reasoning_effort, keep_history=keep_history)
+        self.operator = OperatorAgent()
+        self.validator = ValidatorAgent(client, model=model, temperature=temperature, reasoning_effort=reasoning_effort, keep_history=keep_history)
+
+        # Controls
+        self.max_steps = max(1, int(max_rounds))
+
+    def add_tool(self, tool: ToolSpec) -> None:
+        self.operator.add_tool(tool)
+
+    def remove_tool(self, name: str) -> None:
+        self.operator.remove_tool(name)
+
+    def reset(self) -> None:
+        # Reset Thinker and Validator memories
+        self.thinker.agent.reset()
+        self.validator.agent.reset()
+
+    def ask(self, prompt: str, mode: Optional[str] = None) -> AskResult:
         if not prompt:
             raise OpenRouterError("Empty prompt")
 
-        # Build initial messages
-        if not self.keep_history:
-            self.reset()
-        messages = list(self._messages)
-        messages.append({"role": "user", "content": prompt})
+        tools_catalog = self.operator.tool_catalog()
+        steps: List[ReActStep] = []
+        transcript_lines: List[str] = []
+        messages_accum: List[Dict[str, Any]] = []
+        latest_reasoning: Optional[str] = None
+        usage: Optional[Dict[str, Any]] = None
 
-        tools = self._tool_list_for_api()
-        reasoning = {"effort": self.reasoning_effort} if self.reasoning_effort else None
+        for _ in range(self.max_steps):
+            history_text = "\n\n".join(transcript_lines)
+            thought, action, thinker_res = self.thinker.propose(prompt, tools_catalog, history_text)
+            latest_reasoning = thinker_res.reasoning or latest_reasoning
+            usage = thinker_res.usage or usage
+            messages_accum.extend(thinker_res.messages or [])
 
-        last_resp: Optional[Dict[str, Any]] = None
-        rounds = 0
+            action_desc = action.say or (action.name or action.type)
+            transcript_lines.append(f"Thought: {thought}")
+            transcript_lines.append(f"Action: {action_desc}")
 
-        while True:
-            rounds += 1
-            if rounds > self.max_rounds:
-                raise OpenRouterError(
-                    f"Exceeded max_rounds={self.max_rounds} without final answer"
-                )
+            # Execute
+            observation = self.operator.execute(action)
+            transcript_lines.append(f"Observation: {observation}")
+            steps.append(ReActStep(thought=thought, action=action, observation=observation))
 
-            # Ask the model
-            try:
-                resp = self.client.complete_chat(
-                    messages=messages,
-                    model=self.model,
-                    temperature=self.temperature,
-                    response_format=self.response_format,
-                    reasoning=reasoning,
-                    tools=tools,
-                    tool_choice=self.tool_choice if tools is not None else None,
-                    parallel_tool_calls=self.parallel_tool_calls,
-                )
-            except (OpenRouterAPIError, OpenRouterError) as e:
-                raise e
+            last_step_text = "\n".join(transcript_lines[-3:])
+            done, final_answer, val_res = self.validator.judge(prompt, last_step_text, "\n".join(transcript_lines))
+            messages_accum.extend(val_res.messages or [])
+            usage = val_res.usage or usage
+            if done:
+                content = "\n".join(transcript_lines + ["", f"Final Answer: {final_answer}"])
+                return AskResult(content=content, reasoning=latest_reasoning, usage=usage, messages=messages_accum)
 
-            last_resp = resp
-            # Tool-calling phase (bounded iterations)
-            tool_iters = 0
-            calls = self.client.get_tool_calls(resp)
-            if calls:
-                try:
-                    m = (resp.get("choices") or [{}])[0].get("message")
-                    if isinstance(m, dict):
-                        messages.append(m)
-                except Exception:
-                    pass
-            if not calls:
-                # Fallback: some models emit inline <tools>{...}</tools> blocks in content
-                try:
-                    content_for_tools = self.client.extract_content(resp)
-                except Exception:
-                    content_for_tools = None
-                if content_for_tools:
-                    calls = self._parse_inline_tool_calls(content_for_tools)
-            while calls and tool_iters < self.max_tool_iters:
-                for call in calls:
-                    tool_iters += 1
-                    func_info = call.get("function", {})
-                    name = func_info.get("name")
-                    args_raw = func_info.get("arguments")
-                    try:
-                        args: Dict[str, Any]
-                        if isinstance(args_raw, str):
-                            args = json.loads(args_raw) if args_raw else {}
-                        elif isinstance(args_raw, dict):
-                            args = args_raw
-                        else:
-                            args = {}
-                    except Exception as e:  # invalid JSON
-                        args = {"_parse_error": str(e)}
-
-                    result: str
-                    if name in self._tools:
-                        try:
-                            out = self._tools[name].handler(args)
-                            if isinstance(out, str):
-                                result = out
-                            else:
-                                result = json.dumps(out, ensure_ascii=False)
-                        except Exception as e:
-                            result = f"error: {e}"
-                    else:
-                        result = "error: unknown tool"
-
-                    messages.append(
-                        self.client.make_tool_result(call.get("id", ""), result)
-                    )
-
-                # Ask again; include tools and reasoning to allow multi-round calls
-                try:
-                    resp = self.client.complete_chat(
-                        messages=messages,
-                        model=self.model,
-                        temperature=self.temperature,
-                        response_format=self.response_format,
-                        reasoning=reasoning,
-                        tools=tools,
-                        tool_choice=self.tool_choice if tools is not None else None,
-                        parallel_tool_calls=self.parallel_tool_calls,
-                    )
-                except (OpenRouterAPIError, OpenRouterError) as e:
-                    raise e
-                last_resp = resp
-                calls = self.client.get_tool_calls(resp)
-                if calls:
-                    try:
-                        m = (resp.get("choices") or [{}])[0].get("message")
-                        if isinstance(m, dict):
-                            messages.append(m)
-                    except Exception:
-                        pass
-                if not calls:
-                    try:
-                        content_for_tools = self.client.extract_content(resp)
-                    except Exception:
-                        content_for_tools = None
-                    if content_for_tools:
-                        calls = self._parse_inline_tool_calls(content_for_tools)
-
-            # If no tools were used or tool loop ended, extract final content
-            try:
-                content = self.client.extract_content(last_resp)
-            except OpenRouterError:
-                # If the model insists on more tools beyond limits
-                if tool_iters >= self.max_tool_iters and last_resp is not None:
-                    content = json.dumps(
-                        {
-                            "note": "max_tool_iters reached",
-                            "assistant_message": last_resp,
-                        },
-                        ensure_ascii=False,
-                    )
-                else:
-                    raise
-
-            # Update memory with the final assistant reply
-            messages.append({"role": "assistant", "content": content})
-            if self.keep_history:
-                self._messages = messages
-            else:
-                # retain only system message for stateless mode
-                self.reset()
-
-            reasoning_txt = None
-            try:
-                if last_resp is not None:
-                    reasoning_txt = self.client.extract_reasoning(last_resp)
-            except Exception:
-                reasoning_txt = None
-
-            usage = last_resp.get("usage") if isinstance(last_resp, dict) else None
-            return AskResult(content=content, reasoning=reasoning_txt, usage=usage, messages=messages)
-
-    def _parse_inline_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Parse <tools>/<tool_call>/<tool> JSON tags and code-fenced JSON."""
-        import re
-        calls: List[Dict[str, Any]] = []
-        def _add(obj: Dict[str, Any]) -> None:
-            fn = obj.get("name") or obj.get("tool") or (obj.get("function") or {}).get("name")
-            if not fn:
-                return
-            ar = obj.get("arguments") or obj.get("args") or (obj.get("function") or {}).get("arguments") or {}
-            if not isinstance(ar, (dict, str)):
-                ar = {}
-            ar_s = ar if isinstance(ar, str) else json.dumps(ar, ensure_ascii=False)
-            calls.append({"id": f"inline-{len(calls)}-{fn}", "type": "function", "function": {"name": fn, "arguments": ar_s}})
-        # Tag forms
-        for m in re.finditer(r"<(tools|tool_call|tool)>\s*(\{.*?\})\s*</\1>", content, re.DOTALL):
-            try:
-                _add(json.loads(m.group(2)))
-            except Exception:
-                pass
-        # Code-fenced JSON blocks
-        for m in re.finditer(r"```[a-zA-Z0-9_-]*\s*(\{.*?\})\s*```", content, re.DOTALL):
-            try:
-                _add(json.loads(m.group(1)))
-            except Exception:
-                pass
-        return calls
+        # Max steps reached
+        content = "\n".join(transcript_lines + ["", "Note: max steps reached without a final answer."])
+        return AskResult(content=content, reasoning=latest_reasoning, usage=usage, messages=messages_accum)
 
 
-__all__ = ["ToolSpec", "AskResult", "ReActAgent"]
+__all__ = [
+    "ToolSpec",
+    "AskResult",
+    "ActionSpec",
+    "ReActStep",
+    "ThinkerAgent",
+    "OperatorAgent",
+    "ValidatorAgent",
+    "ReActAgent",
+]
