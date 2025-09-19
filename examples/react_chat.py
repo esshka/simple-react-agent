@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List
-from urllib.parse import urlparse
+from typing import List
+
+from simple_or_agent.tools.web_search import make_fetch_page_tool, make_web_search_tool
 
 # Load .env if available (optional)
 try:
@@ -44,147 +45,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-results", type=int, default=8, help="Max search results per query (3-15)")
     p.add_argument("--fetch-chars", type=int, default=5000, help="Max characters to return from fetched page (1000-15000)")
     return p
-
-
-def make_web_search_tool(default_region: str, default_time: str | None, default_max: int) -> ToolSpec:
-    SERP_HOSTS = {
-        "bing.com", "www.bing.com",
-        "google.com", "www.google.com",
-        "duckduckgo.com", "www.duckduckgo.com",
-        "search.yahoo.com", "yahoo.com", "www.yahoo.com",
-        "startpage.com", "www.startpage.com",
-        "yandex.com", "www.yandex.com", "yandex.ru", "www.yandex.ru",
-        "baidu.com", "www.baidu.com",
-    }
-    def _is_serp(url: str) -> bool:
-        try:
-            p = urlparse(url)
-            host = (p.hostname or "").lower()
-            if not host:
-                return False
-            if host in SERP_HOSTS:
-                return True
-            if any(seg in (p.path or "").lower() for seg in ("/search", "/html", "/lite")) and (
-                host.endswith("google.com") or host.endswith("bing.com") or host.endswith("duckduckgo.com") or host.endswith("yahoo.com")
-            ):
-                return True
-            return False
-        except Exception:
-            return False
-    def handler(args: Dict[str, Any]) -> Any:
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return {"error": "empty_query"}
-        try:
-            from ddgs import DDGS  # type: ignore
-        except Exception as e:
-            return {"error": f"ddgs_import_failed: {e}"}
-        region = str(args.get("region", default_region) or default_region)
-        timelimit = args.get("time", default_time)
-        max_results = int(args.get("max_results", default_max) or default_max)
-        max_results = max(3, min(max_results, 15))
-        out: List[Dict[str, Any]] = []
-        try:
-            with DDGS() as ddg:
-                for r in ddg.text(query, region=region, safesearch="moderate", timelimit=timelimit, max_results=max_results):
-                    url = r.get("href")
-                    if not url or _is_serp(url):
-                        continue
-                    out.append({"title": r.get("title"), "url": url, "snippet": r.get("body")})
-        except Exception as e:
-            return {"error": f"ddgs_search_failed: {e}", "query": query}
-        return {"query": query, "results": out[:max_results]}
-    params: Dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search query"},
-            "max_results": {"type": "integer", "minimum": 3, "maximum": 15, "default": default_max},
-            "region": {"type": "string", "default": default_region},
-            "time": {"type": ["string", "null"], "enum": [None, "d", "w", "m", "y"], "default": default_time},
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    }
-    return ToolSpec(name="web_search", description="Search the web via ddgs (DuckDuckGo) and return top results (title, url, snippet)", parameters=params, handler=handler)
-
-
-def make_fetch_page_tool(default_max_chars: int) -> ToolSpec:
-    UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    SERP_HOSTS = {
-        "bing.com", "www.bing.com",
-        "google.com", "www.google.com",
-        "duckduckgo.com", "www.duckduckgo.com",
-        "search.yahoo.com", "yahoo.com", "www.yahoo.com",
-        "startpage.com", "www.startpage.com",
-        "yandex.com", "www.yandex.com", "yandex.ru", "www.yandex.ru",
-        "baidu.com", "www.baidu.com",
-    }
-    def _is_serp(url: str) -> bool:
-        try:
-            p = urlparse(url)
-            host = (p.hostname or "").lower()
-            if not host:
-                return False
-            if host in SERP_HOSTS:
-                return True
-            if any(seg in (p.path or "").lower() for seg in ("/search", "/html", "/lite")) and (
-                host.endswith("google.com") or host.endswith("bing.com") or host.endswith("duckduckgo.com") or host.endswith("yahoo.com")
-            ):
-                return True
-            return False
-        except Exception:
-            return False
-    def _extract_text(html: str) -> str:
-        try:
-            from bs4 import BeautifulSoup  # type: ignore
-        except Exception:
-            return ""
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        parts: List[str] = []
-        for sel in ["h1", "h2", "h3", "p", "li"]:
-            for el in soup.select(sel):
-                t = (el.get_text(" ", strip=True) or "").strip()
-                if t:
-                    parts.append(t)
-        return "\n".join(line.strip() for line in "\n".join(parts).splitlines() if line.strip())
-    def handler(args: Dict[str, Any]) -> Any:
-        import requests
-        url = str(args.get("url", "")).strip()
-        if not url:
-            return {"error": "empty_url"}
-        if _is_serp(url):
-            return {"error": "blocked_serp_url", "url": url}
-        max_chars = int(args.get("max_chars", default_max_chars) or default_max_chars)
-        max_chars = max(1000, min(max_chars, 15000))
-        try:
-            resp = requests.get(url, timeout=15, headers={"User-Agent": UA})
-            resp.raise_for_status()
-        except Exception as e:
-            return {"error": f"fetch_failed: {e}", "url": url}
-        title = None
-        try:
-            from bs4 import BeautifulSoup  # type: ignore
-            soup = BeautifulSoup(resp.text, "html.parser")
-            if soup.title and soup.title.string:
-                title = soup.title.string.strip()
-        except Exception:
-            title = None
-        text = _extract_text(resp.text)
-        if len(text) > max_chars:
-            text = text[:max_chars]
-        return {"url": url, "title": title, "text": text, "length": len(text)}
-    params: Dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "Page URL to fetch"},
-            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 15000, "default": default_max_chars},
-        },
-        "required": ["url"],
-        "additionalProperties": False,
-    }
-    return ToolSpec(name="fetch_page", description="Fetch a web page and return cleaned text (capped by max_chars)", parameters=params, handler=handler)
 
 
 def main(argv: List[str]) -> int:

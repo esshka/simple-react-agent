@@ -13,6 +13,12 @@ dependencies = [
     "python-dotenv>=1.0",
     "ddgs>=1.0",
     "beautifulsoup4>=4.12",
+    "aiohttp (>=3.12.15,<4.0.0)",
+    "pydantic (>=2.11.9,<3.0.0)",
+    "sympy (>=1.14.0,<2.0.0)",
+    "pymongo (>=4.15.1,<5.0.0)",
+    "pytest (>=8.4.2,<9.0.0)",
+    "wikipedia (>=1.4.0,<2.0.0)",
 ]
 
 [tool.poetry]
