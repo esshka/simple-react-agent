@@ -83,3 +83,6 @@ Thumbs.db
 .uv/
 pip-wheel-metadata/
 AGENTS.md
+
+# Serena
+.serena

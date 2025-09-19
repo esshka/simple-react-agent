@@ -11,8 +11,8 @@ from __future__ import annotations
 import argparse
 import sys
 import os
-import ast
-import operator as op
+
+from simple_or_agent.tools import make_calc_tool
 
 # Load .env if available (so OPENROUTER_API_KEY is picked up)
 try:  # pragma: no cover - convenience
@@ -39,43 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reasoning-effort", choices=["low", "medium", "high"], default=None, help="Enable and set reasoning effort")
     p.add_argument("--show-transcript", action="store_true", help="Print ReACT Thought/Action/Observation transcript")
     return p
-
-
-def make_calc_tool() -> ToolSpec:
-    """Create a safe calculator tool using a tiny AST evaluator."""
-    allowed = {
-        ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv,
-        ast.Pow: op.pow, ast.Mod: op.mod, ast.USub: op.neg, ast.UAdd: op.pos,
-    }
-
-    def _eval(node):
-        if isinstance(node, ast.Num):  # type: ignore[attr-defined]
-            return node.n
-        if isinstance(node, ast.UnaryOp) and type(node.op) in (ast.UAdd, ast.USub):
-            return allowed[type(node.op)](_eval(node.operand))
-        if isinstance(node, ast.BinOp) and type(node.op) in allowed:
-            return allowed[type(node.op)](_eval(node.left), _eval(node.right))
-        raise ValueError("unsupported expression")
-
-    def handler(args):
-        expr = str(args.get("expression", "")).strip()
-        if not expr:
-            return {"error": "empty_expression"}
-        try:
-            tree = ast.parse(expr, mode="eval")
-            val = _eval(tree.body)  # type: ignore[arg-type]
-            return {"expression": expr, "value": val}
-        except Exception as e:
-            return {"error": str(e)}
-
-    params = {
-        "type": "object",
-        "properties": {"expression": {"type": "string", "description": "Arithmetic expression"}},
-        "required": ["expression"],
-        "additionalProperties": False,
-    }
-    return ToolSpec(name="calc", description="Evaluate basic arithmetic expression and return a JSON result", parameters=params, handler=handler)
-
 
 def _split_transcript_and_final(text: str) -> tuple[str, str]:
     if not isinstance(text, str) or not text:

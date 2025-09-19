@@ -1,17 +1,26 @@
+# src/simple_or_agent/next_agent.py
+# Planner + ReACT agent orchestrated with scoped memory.
+# This exists to keep plans focused and execution context clean.
+# RELEVANT FILES: src/simple_or_agent/orchestrator.py,src/simple_or_agent/memory.py,src/simple_or_agent/react_agent.py
+
+#!/usr/bin/env python3
+
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Callable
 
 from .openrouter_client import OpenRouterClient, OpenRouterError
 from .simple_agent import SimpleAgent, ToolSpec, AskResult
 from .react_agent import ReActAgent as ExecReActAgent
+from .orchestrator import Orchestrator
+from .memory import ConversationMemory, MemoryPolicy
 
 
 class NextAgent:
-    """Planner + ReACT execution for hard tasks.
+    """Planner + ReACT execution coordinated by an Orchestrator.
 
-    - Planner: creates a concise, high‑leverage plan and clarifying questions.
-    - ReACT: executes via Thought → Action → Observation until Final Answer.
+    - Orchestrator decides what context to pass each subagent.
+    - ConversationMemory keeps short summaries and recent steps.
     """
 
     PLANNER_SYSTEM = (
@@ -32,6 +41,7 @@ class NextAgent:
         temperature: float = 0.1,
         max_rounds: int = 8,
         reasoning_effort: Optional[str] = None,
+        memory_policy: Optional[MemoryPolicy] = None,
     ) -> None:
         self.planner = SimpleAgent(
             client,
@@ -60,6 +70,10 @@ class NextAgent:
             parallel_tool_calls=False,
         )
 
+        # Orchestrator + memory. No model summarizer by default; use naive.
+        self.memory = ConversationMemory(policy=memory_policy or MemoryPolicy())
+        self.orch = Orchestrator(self.memory)
+
     def add_tool(self, tool: ToolSpec) -> None:
         self.executor.add_tool(tool)
 
@@ -69,40 +83,44 @@ class NextAgent:
     def reset(self) -> None:
         self.planner.reset()
         self.executor.reset()
+        self.memory.clear_all()
 
-    def plan(self, prompt: str) -> AskResult:
-        if not prompt:
-            raise OpenRouterError("Empty prompt")
-        plan_prompt = (
-            f"Task:\n{prompt}\n\n"
+    # --- prompt builders: keep consistent phrasing across subagents ---
+    @staticmethod
+    def _build_planner_prompt(task: str, prior: str) -> str:
+        extra = f"\n\nPrior context (summary):\n{prior}" if prior else ""
+        return (
+            f"Task:\n{task}{extra}\n\n"
             "Produce ONLY: Steps, Assumptions, Risks/Mitigations, and optional Clarifying Questions.\n"
             "Do not solve or compute anything."
         )
-        return self.planner.ask(plan_prompt)
 
-    def execute_with_plan(self, task: str, plan_text: str) -> AskResult:
-        if not task:
-            raise OpenRouterError("Empty task")
-        goal = (
+    @staticmethod
+    def _build_exec_prompt(task: str, plan_text: str, notes: str) -> str:
+        ctx = f"\n\nNotes (summary):\n{notes}" if notes else ""
+        return (
             f"Task:\n{task}\n\n"
-            f"Plan (follow step-by-step; adapt if needed):\n{plan_text}\n\n"
+            f"Plan (follow step-by-step; adapt if needed):\n{plan_text}{ctx}\n\n"
             "Use a Thought → Action → Observation cycle. Prefer tools when helpful.\n"
             "Stop when the task is solved and provide the Final Answer."
         )
-        return self.executor.ask(goal)
 
-    def ask(self, prompt: str, mode: Optional[str] = None) -> AskResult:
+    # --- public API ---
+    def plan(self, prompt: str) -> AskResult:
+        return self.orch.plan(self.planner, prompt, self._build_planner_prompt)
+
+    def execute_with_plan(self, task: str, plan_text: str, progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> AskResult:
+        return self.orch.execute(self.executor, task, plan_text, self._build_exec_prompt, progress_cb)
+
+    def ask(self, prompt: str, mode: Optional[str] = None, progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> AskResult:
         if mode == "planner":
             return self.plan(prompt)
         if mode == "react":
             # Treat prompt as a standalone goal (no pre-plan)
-            return self.executor.ask(prompt)
+            return self.executor.ask(prompt, progress_cb=progress_cb)
 
-        plan_res = self.plan(prompt)
-        exec_res = self.execute_with_plan(prompt, plan_res.content)
-        content = (
-            "Plan\n" + plan_res.content.strip() + "\n\n" + exec_res.content.strip()
-        )
+        plan_res, exec_res = self.orch.ask(self.planner, self.executor, prompt, self._build_planner_prompt, self._build_exec_prompt, progress_cb)
+        content = "Plan\n" + (plan_res.content or "").strip() + "\n\n" + (exec_res.content or "").strip()
         messages: List[Dict[str, Any]] = (plan_res.messages or []) + (exec_res.messages or [])
         return AskResult(content=content, reasoning=exec_res.reasoning, usage=exec_res.usage, messages=messages)
 
