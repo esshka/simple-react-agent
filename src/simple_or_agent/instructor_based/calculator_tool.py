@@ -17,7 +17,7 @@ import ast
 import operator as op
 from typing import Any, Dict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from simple_or_agent.instructor_based.tools import ToolSpec
 
@@ -25,6 +25,9 @@ from simple_or_agent.instructor_based.tools import ToolSpec
 class CalcArgs(BaseModel):
     """Inputs for the calculator tool."""
     expr: str
+
+    # Match the tool call name that we expose in prompts and docs.
+    model_config = ConfigDict(title="calculate")
 
 
 OPS = {
@@ -63,8 +66,9 @@ def build_calculator_tool() -> ToolSpec:
     return ToolSpec(
         name="calculate",
         description="Evaluate a mathematical expression.",
-        response_model=CalcArgs,
+        args_model=CalcArgs,
         handler=calculate,
+        parameters={"expr": "string expression to evaluate"},
     )
 
 

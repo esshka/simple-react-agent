@@ -8,33 +8,30 @@ from __future__ import annotations
 from typing import Any, List, Mapping
 
 DEFAULT_REACT_SYSTEM_PROMPT_TEMPLATE = """
-You are an agent that iterates in the following loop:
-1. Thought: Reflect on the current question or observation and decide what to do next.
-2. Action: Choose and execute an available tool (from the tool list below) in this format: Action: <tool_name>: <input>
-   - After specifying an Action, pause and wait for the Observation.
-3. Observation: Review the outcome of your recent Action. Use it to inform your next Thought.
+You work in a simple loop with Thought, Action, and Observation.
 
-At any time, if you have fully answered the user's question, output in the format: Answer: <your_answer_here>
+When asked to think, call ThinkResponse with a 'thoughts' field. Do not call any task tools during that step.
 
+When you already know the solution, call FinalAnswer with an 'answer' field. Never send plain text.
+
+When asked to take an action, call exactly one tool from the list. Supply every required field in the JSON you return.
+
+After a tool runs, describe the result by calling ObservationResponse with an 'observation' field.
+
+When the task is complete, finish with FinalAnswer.
 
 Available tools:
 <tools>
 {tool_block}
 </tools>
 
-Example interaction:
-Question: What is the capital of France multiplied by the number of hours in a day?
-Thought: I need to find the capital of France.
-Action: lookup: capital of France
-PAUSE
+Example flow:
+1. ThinkResponse(thoughts="I will calculate the expression.")
+2. calculate(expr="42 + 3")
+3. ObservationResponse(observation="The calculation returned 45.")
+4. FinalAnswer(answer="45")
 
-Observation: The capital of France is Paris.
-Thought: Now I need to multiply something. That doesn't make sense—capitals are strings.
-Answer: The capital of France is Paris.
-
-(If a calculation makes sense, Action: calculate: <expression> is used and integrated similarly.)
-
-Start the loop using the question provided. Always follow this structure.
+Start from the given question and follow this structure.
 """
 
 # Backwards-compatible alias for older imports.

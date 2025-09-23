@@ -83,7 +83,6 @@ def _build_client(
         mode=mode,
     )
 
-
 class FinalAnswer(BaseModel):
     """Final answer response"""
     type: Literal["final"] = "final"
@@ -94,37 +93,6 @@ class ThinkResponse(BaseModel):
     """Thought response"""
     type: Literal["think"] = "think"
     thoughts: str
-
-
-class ObservationResponse(BaseModel):
-    """Observation response"""
-    type: Literal["observation"] = "observation"
-    observation: str
-
-
-def _stringify_message_content(value: Any) -> str:
-    """Convert structured results into plain text for chat message transport."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, BaseModel):
-        return value.model_dump_json()
-    if isinstance(value, (dict, list)):
-        return json.dumps(value)
-    return str(value)
-
-
-def _maybe_extract_final_answer(text: str) -> Optional[str]:
-    """Detect a final answer embedded inside a thought response."""
-    lowered = text.lower()
-    markers = ["answer:", "answer is", "final answer:", "final answer is", "final answer", "final result"]
-    for marker in markers:
-        index = lowered.find(marker)
-        if index == -1:
-            continue
-        remainder = text[index + len(marker):].strip(" .:")
-        if remainder:
-            return remainder
-    return None
 
 
 class ReActAgent:
@@ -230,7 +198,15 @@ class ReActAgent:
         return render_system_prompt(self._system_prompt_template, self._tools.as_mapping())
 
     def think(self) -> Union[ThinkResponse, FinalAnswer]:
-        self.messages.append({"role": "user", "content": "Think about the current question or observation and decide what to do next. Can we answer the question with the information we have? If so, respond with FinalAnswer. If not, respond with ThinkResponse."})
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "Reflect on the current question or observation.\n"
+                "Reply with ThinkResponse when you need another step.\n"
+                "Reply with FinalAnswer when the solution is ready.\n"
+                "Do not call any action tool in this step."
+            ),
+        })
         return self.client.chat.completions.create(
             model=self.model_id,
             messages=self.messages,
@@ -242,8 +218,11 @@ class ReActAgent:
             raise RuntimeError("No tools registered for this agent")
 
         self.messages.append({
-            "role": "user", 
-            "content": "Choose and call an available tool based on the latest thoughts"
+            "role": "user",
+            "content": (
+                "Pick one available tool and call it exactly once.\n"
+                "Provide every required field in the JSON you return."
+            ),
         })
 
         available_tool_response_models = self._tools.response_union()
@@ -258,12 +237,16 @@ class ReActAgent:
         return tool_name, spec, response
        
 
-    def observation(self) -> Dict[str, Any]:
-        self.messages.append({"role": "user", "content": "Review the outcome of your recent Action. Use it to inform your next Thought."})
+    def observation(self) -> str:
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "Review the latest tool result and explain what it means."
+            ),
+        })
         return self.client.chat.completions.create(
             model=self.model_id,
             messages=self.messages,
-            response_model=ObservationResponse,
         )
 
     def run(self, prompt: str) -> str:
@@ -280,18 +263,12 @@ class ReActAgent:
             think_response = self.think()
 
             if think_response.type == "final":
-                final_answer = think_response.answer.strip()
-                self.messages.append({"role": "assistant", "content": f"Answer: {final_answer}"})
+                final_answer = think_response.answer
+                self.messages.append({"role": "assistant", "content": final_answer})
                 return final_answer
 
             if think_response.type != "think":
                 raise ValueError("Invalid think response")
-
-            extracted = _maybe_extract_final_answer(think_response.thoughts)
-            if extracted:
-                final_answer = extracted.strip()
-                self.messages.append({"role": "assistant", "content": f"Answer: {final_answer}"})
-                return final_answer
 
             self.messages.append({"role": "assistant", "content": think_response.thoughts})
 
@@ -302,13 +279,8 @@ class ReActAgent:
             payload_dict = action_payload.model_dump()
             self.messages.append({"role": "assistant", "content": f"Action: {tool_name} -> {payload_dict}"})
 
-            handler = tool_spec.handler
-            tool_call_result = handler(payload_dict)
-            tool_message = _stringify_message_content(tool_call_result)
-            self.messages.append({"role": "tool", "content": tool_message})
-
             observation_response = self.observation()
-            self.messages.append({"role": "assistant", "content": observation_response.observation})
+            self.messages.append({"role": "assistant", "content": observation_response})
 
         raise RuntimeError("Reached max steps without a final answer")
 
