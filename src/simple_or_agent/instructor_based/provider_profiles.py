@@ -1,7 +1,7 @@
 # src/simple_or_agent/instructor_based/provider_profiles.py
 # Loads Instructor provider profiles and helps apply them to the environment.
 # Exists to keep provider defaults simple and let us switch via one-liners.
-# RELEVANT FILES: src/simple_or_agent/instructor_based/providers.ini, src/simple_or_agent/instructor_based/instructor_client.py, src/simple_or_agent/instructor_based/agent.py
+# RELEVANT FILES: src/simple_or_agent/instructor_based/providers.ini, src/simple_or_agent/instructor_based/agent.py, src/simple_or_agent/instructor_based/lmstudio_client.py
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from typing import Dict, Iterable, Optional
 from instructor import Mode
 
 PROFILE_ENV = "INSTRUCTOR_PROFILE"
-DEFAULT_PROFILE = "openrouter"
+MODEL_ENV = "INSTRUCTOR_MODEL_ID"
+DEFAULT_PROFILE = "lmstudio"
 CONFIG_PATH = Path(__file__).with_name("providers.ini")
 
 
@@ -25,6 +26,7 @@ class ProviderProfile:
     provider_id: str
     base_url: Optional[str]
     mode: Optional[Mode]
+    model_id: Optional[str]
     default_api_key: Optional[str]
 
     def env_overrides(self) -> Dict[str, Optional[str]]:
@@ -34,6 +36,7 @@ class ProviderProfile:
             "INSTRUCTOR_PROVIDER_ID": self.provider_id,
             "INSTRUCTOR_BASE_URL": self.base_url,
             "INSTRUCTOR_MODE": self.mode.name if self.mode else None,
+            MODEL_ENV: self.model_id,
             "INSTRUCTOR_API_KEY": self.default_api_key,
         }
 
@@ -61,6 +64,11 @@ def _load_profiles() -> Dict[str, ProviderProfile]:
             raise ValueError(f"Provider id missing for profile '{section}' in providers.ini")
         base_url = parser.get(section, "base_url", fallback="").strip() or None
         mode_name = parser.get(section, "mode", fallback="").strip().upper() or None
+        if normalized == 'openrouter' and not mode_name:
+            mode_name = 'JSON'
+        if normalized == 'openrouter' and mode_name == 'JSON_SCHEMA':
+            mode_name = 'JSON'
+        model_id = parser.get(section, "model", fallback="").strip() or None
         default_key = parser.get(section, "default_api_key", fallback="").strip() or None
         mode = Mode[mode_name] if mode_name else None
         profiles[normalized] = ProviderProfile(
@@ -68,6 +76,7 @@ def _load_profiles() -> Dict[str, ProviderProfile]:
             provider_id=raw_provider,
             base_url=base_url,
             mode=mode,
+            model_id=model_id,
             default_api_key=default_key,
         )
 
@@ -92,6 +101,15 @@ def resolve_profile(name: Optional[str] = None) -> ProviderProfile:
     if profile is None:
         raise ValueError(f"Unknown profile '{requested}'. Try one of: {', '.join(available_profiles())}")
     return profile
+
+
+def resolved_model_from_env() -> Optional[str]:
+    """Return the explicit model override if present."""
+    raw = os.getenv(MODEL_ENV)
+    if not raw:
+        return None
+    trimmed = raw.strip()
+    return trimmed or None
 
 
 def format_shell_exports(profile: ProviderProfile) -> str:
@@ -134,10 +152,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
 __all__ = [
     "PROFILE_ENV",
+    "MODEL_ENV",
     "DEFAULT_PROFILE",
     "available_profiles",
     "format_shell_exports",
     "resolve_profile",
+    "resolved_model_from_env",
 ]
 
 

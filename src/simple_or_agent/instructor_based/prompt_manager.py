@@ -1,7 +1,7 @@
 # src/simple_or_agent/instructor_based/prompt_manager.py
 # Stores template helpers for the Instructor-based ReAct system prompt.
 # Exists so agents can render up-to-date tool listings for the LLM.
-# RELEVANT FILES: src/simple_or_agent/instructor_based/agent.py, src/simple_or_agent/instructor_based/tools.py, src/simple_or_agent/instructor_based/instructor_client.py
+# RELEVANT FILES: src/simple_or_agent/instructor_based/agent.py, src/simple_or_agent/instructor_based/tools.py, src/simple_or_agent/instructor_based/provider_profiles.py
 
 from __future__ import annotations
 

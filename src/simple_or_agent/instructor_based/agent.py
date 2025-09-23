@@ -1,25 +1,76 @@
 # src/simple_or_agent/instructor_based/agent.py
 # Implements an Instructor-powered ReAct agent loop with tool support.
 # Exists to offer a minimal LMStudio-friendly orchestrator in this codebase.
-# RELEVANT FILES: src/simple_or_agent/instructor_based/instructor_client.py, src/simple_or_agent/instructor_based/prompt_manager.py, src/simple_or_agent/instructor_based/tools.py
+# RELEVANT FILES: src/simple_or_agent/instructor_based/lmstudio_client.py, src/simple_or_agent/instructor_based/openrouter_client.py, src/simple_or_agent/instructor_based/tools.py
 
 from __future__ import annotations
 
 import ast
 import json
 import operator as op
+import os
 from typing import Any, Dict, List, Optional, Tuple, Literal, Union
 
+from instructor import Mode
 from pydantic import BaseModel
 
 from simple_or_agent.instructor_based.prompt_manager import (
     DEFAULT_REACT_SYSTEM_PROMPT_TEMPLATE,
     render_system_prompt,
 )
-from simple_or_agent.instructor_based import instructor_client as instructor_helpers
-from simple_or_agent.instructor_based.instructor_client import build_instructor_client
-from simple_or_agent.instructor_based.provider_profiles import resolve_profile
+from simple_or_agent.instructor_based import lmstudio_client
+from simple_or_agent.instructor_based import openrouter_client
+from simple_or_agent.instructor_based.provider_profiles import resolve_profile, resolved_model_from_env
 from simple_or_agent.instructor_based.tools import ToolRegistry, ToolSpec
+
+API_KEY_ENV = "INSTRUCTOR_API_KEY"
+FALLBACK_KEY_ENV = "OPENROUTER_API_KEY"
+PROVIDER_ENV = "INSTRUCTOR_PROVIDER_ID"
+BASE_URL_ENV = "INSTRUCTOR_BASE_URL"
+MODE_ENV = "INSTRUCTOR_MODE"
+
+
+def _resolve_api_key() -> Optional[str]:
+    """Read the preferred API key from the environment."""
+    value = os.getenv(API_KEY_ENV) or os.getenv(FALLBACK_KEY_ENV)
+    if not value:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _resolve_provider() -> Optional[str]:
+    """Return the explicit provider override when set."""
+    value = os.getenv(PROVIDER_ENV)
+    if not value:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _resolve_base_url() -> Optional[str]:
+    """Return the explicit base URL override when set."""
+    value = os.getenv(BASE_URL_ENV)
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _resolve_mode() -> Optional[Mode]:
+    """Map INSTRUCTOR_MODE to an Instructor Mode enum value."""
+    raw = os.getenv(MODE_ENV)
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    try:
+        return Mode[candidate.upper()]
+    except KeyError:
+        names = ", ".join(member.name for member in Mode)
+        print(f"Unknown INSTRUCTOR_MODE '{raw}'. Valid options: {names}")
+        return None
 
 
 def _derive_model_id(model: Optional[str], provider_id: Optional[str]) -> str:
@@ -33,6 +84,28 @@ def _derive_model_id(model: Optional[str], provider_id: Optional[str]) -> str:
             return provider_id.split("/", 1)[1]
         return provider_id
     return "qwen/qwen3-next-80b-a3b-instruct"
+
+
+def _build_client(
+    api_key: str,
+    provider_id: str,
+    base_url: Optional[str],
+    mode: Optional[Mode],
+) -> Any:
+    """Create an Instructor client for the resolved provider."""
+    if base_url or lmstudio_client.is_lmstudio_provider(provider_id):
+        normalized_base = lmstudio_client.normalize_base_url(base_url)
+        resolved_mode = mode or lmstudio_client.LMSTUDIO_DEFAULT_MODE
+        return lmstudio_client.build_client(
+            api_key=api_key,
+            base_url=normalized_base,
+            mode=resolved_mode,
+        )
+    return openrouter_client.build_client(
+        api_key=api_key,
+        provider_id=provider_id,
+        mode=mode,
+    )
 
 
 class FinalAnswer(BaseModel):
@@ -67,14 +140,7 @@ def _stringify_message_content(value: Any) -> str:
 def _maybe_extract_final_answer(text: str) -> Optional[str]:
     """Detect a final answer embedded inside a thought response."""
     lowered = text.lower()
-    markers = [
-        "answer:",
-        "answer is",
-        "final answer:",
-        "final answer is",
-        "final answer",
-        "final result",
-    ]
+    markers = ["answer:", "answer is", "final answer:", "final answer is", "final answer", "final result"]
     for marker in markers:
         index = lowered.find(marker)
         if index == -1:
@@ -98,13 +164,24 @@ class ReActAgent:
         provider_id: Optional[str] = None,
     ) -> None:
         profile = resolve_profile()  # Load provider defaults from providers.ini.
-        env_provider = instructor_helpers._resolve_provider()  # Let env override the provider.
-        env_base_url = instructor_helpers._resolve_base_url()  # Let env override the base URL.
-        env_mode = instructor_helpers._resolve_mode()  # Let env override the mode.
+        env_provider = _resolve_provider()  # Let env override the provider.
+        env_base_url = _resolve_base_url()  # Let env override the base URL.
+        env_mode = _resolve_mode()  # Let env override the mode.
+        env_model = resolved_model_from_env()  # Allow env to override the model id.
         using_profile_defaults = (
-            provider_id is None and base_url is None and env_provider is None and env_base_url is None
+            provider_id is None
+            and base_url is None
+            and env_provider is None
+            and env_base_url is None
+            and env_mode is None
+            and env_model is None
         )  # Only rely on the profile when nothing else is set.
-        resolved_provider = provider_id or env_provider or profile.provider_id
+        resolved_provider = (
+            provider_id
+            or env_provider
+            or profile.provider_id
+            or openrouter_client.DEFAULT_OPENROUTER_PROVIDER
+        )
         if base_url is not None:
             resolved_base_url = base_url
         elif env_base_url is not None:
@@ -114,31 +191,48 @@ class ReActAgent:
         else:
             resolved_base_url = None
 
+        if resolved_base_url and lmstudio_client.is_lmstudio_provider(resolved_provider):
+            resolved_base_url = lmstudio_client.normalize_base_url(resolved_base_url)
+
         resolved_api_key = (
             api_key
-            or instructor_helpers._resolve_api_key()
+            or _resolve_api_key()
             or (profile.default_api_key if using_profile_defaults else None)
         )
         if not resolved_api_key:
             raise ValueError("api_key is required for ReActAgent")
 
-        fallback_model = _derive_model_id(model, resolved_provider)
-        if using_profile_defaults and not model and resolved_base_url:
-            resolved_model = instructor_helpers._discover_model_id(
-                resolved_base_url,
-                resolved_api_key,
-                fallback_model,
-            )
+        explicit_model = model or env_model or (profile.model_id if using_profile_defaults else None)
+        if explicit_model:
+            resolved_model = explicit_model
         else:
-            resolved_model = fallback_model
+            fallback_model = _derive_model_id(None, resolved_provider)
+            if (
+                using_profile_defaults
+                and resolved_base_url
+                and lmstudio_client.is_lmstudio_provider(resolved_provider)
+            ):
+                resolved_model = lmstudio_client.discover_model_id(
+                    resolved_base_url,
+                    resolved_api_key,
+                    fallback_model,
+                )
+            else:
+                resolved_model = fallback_model
 
-        build_kwargs: Dict[str, Any] = {"api_key": resolved_api_key, "provider_id": resolved_provider, "base_url": resolved_base_url}
         if using_profile_defaults and profile.mode:
-            build_kwargs["mode"] = profile.mode
+            resolved_mode = profile.mode
         elif env_mode is not None:
-            build_kwargs["mode"] = env_mode
+            resolved_mode = env_mode
+        else:
+            resolved_mode = None
 
-        self.client = build_instructor_client(**build_kwargs)
+        self.client = _build_client(
+            api_key=resolved_api_key,
+            provider_id=resolved_provider,
+            base_url=resolved_base_url,
+            mode=resolved_mode,
+        )
         self.model_id = resolved_model
         self.temperature = temperature
         self.max_steps = max(1, int(max_steps))
@@ -256,14 +350,7 @@ class ReActAgent:
 class CalcArgs(BaseModel):
     expr: str
 
-OPS = {
-    ast.Add: op.add,
-    ast.Sub: op.sub,
-    ast.Mult: op.mul,
-    ast.Div: op.truediv,
-    ast.Pow: op.pow,
-    ast.USub: op.neg,
-}
+OPS = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv, ast.Pow: op.pow, ast.USub: op.neg}
 
 def _eval_expression(node: ast.AST) -> float:
     """Evaluate a safe arithmetic AST node."""

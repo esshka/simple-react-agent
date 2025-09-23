@@ -1,7 +1,7 @@
 # src/simple_or_agent/instructor_based/tools.py
 # Defines tool specifications and registry for Instructor-powered agents.
 # Exists to help agents declare and resolve tool calls consistently.
-# RELEVANT FILES: src/simple_or_agent/instructor_based/agent.py, src/simple_or_agent/instructor_based/prompt_manager.py, src/simple_or_agent/instructor_based/instructor_client.py
+# RELEVANT FILES: src/simple_or_agent/instructor_based/agent.py, src/simple_or_agent/instructor_based/prompt_manager.py, src/simple_or_agent/instructor_based/lmstudio_client.py
 
 from __future__ import annotations
 
