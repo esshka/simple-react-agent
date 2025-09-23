@@ -135,6 +135,26 @@ def _resolve_mode() -> Optional[Mode]:
         return None
 
 
+def resolve_api_key_from_env() -> Optional[str]:
+    """Return the OpenRouter API key configured via environment variables."""
+    return _resolve_api_key()
+
+
+def resolve_provider_from_env() -> Optional[str]:
+    """Return the OpenRouter provider override configured via environment variables."""
+    return _resolve_provider()
+
+
+def resolve_mode_from_env() -> Optional[Mode]:
+    """Return the OpenRouter mode override configured via environment variables."""
+    return _resolve_mode()
+
+
+def normalize_mode(value: Optional[Mode]) -> Optional[Mode]:
+    """Expose the OpenRouter mode normalization logic for reuse."""
+    return _normalize_mode(value)
+
+
 def main() -> int:
     profile = resolve_profile()
     if not is_openrouter(profile.provider_id):
@@ -167,6 +187,10 @@ __all__ = [
     "provider_model_hint",
     "run_example",
     "main",
+    "resolve_api_key_from_env",
+    "resolve_provider_from_env",
+    "resolve_mode_from_env",
+    "normalize_mode",
 ]
 
 

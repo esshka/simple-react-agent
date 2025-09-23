@@ -1,13 +1,19 @@
 # src/simple_or_agent/instructor_based/agent.py
 # Implements an Instructor-powered ReAct agent loop with tool support.
-# Exists to offer a minimal LMStudio-friendly orchestrator in this codebase.
-# RELEVANT FILES: src/simple_or_agent/instructor_based/lmstudio_client.py, src/simple_or_agent/instructor_based/openrouter_client.py, src/simple_or_agent/instructor_based/tools.py
+# Exists to offer a minimal OpenRouter-friendly orchestrator in this codebase.
+# RELEVANT FILES: src/simple_or_agent/instructor_based/openrouter_client.py, src/simple_or_agent/instructor_based/provider_profiles.py, src/simple_or_agent/instructor_based/calculator_tool.py
 
 from __future__ import annotations
 
-import ast
+from pathlib import Path
+import sys
+
+if __package__ in {None, ''}:
+    project_src = Path(__file__).resolve().parent.parent.parent
+    if str(project_src) not in sys.path:
+        sys.path.insert(0, str(project_src))
+
 import json
-import operator as op
 import os
 from typing import Any, Dict, List, Optional, Tuple, Literal, Union
 
@@ -18,43 +24,22 @@ from simple_or_agent.instructor_based.prompt_manager import (
     DEFAULT_REACT_SYSTEM_PROMPT_TEMPLATE,
     render_system_prompt,
 )
-from simple_or_agent.instructor_based import lmstudio_client
 from simple_or_agent.instructor_based import openrouter_client
+from simple_or_agent.instructor_based.calculator_tool import build_calculator_tool
 from simple_or_agent.instructor_based.provider_profiles import resolve_profile, resolved_model_from_env
 from simple_or_agent.instructor_based.tools import ToolRegistry, ToolSpec
 
-API_KEY_ENV = "INSTRUCTOR_API_KEY"
-FALLBACK_KEY_ENV = "OPENROUTER_API_KEY"
-PROVIDER_ENV = "INSTRUCTOR_PROVIDER_ID"
-BASE_URL_ENV = "INSTRUCTOR_BASE_URL"
 MODE_ENV = "INSTRUCTOR_MODE"
 
 
 def _resolve_api_key() -> Optional[str]:
     """Read the preferred API key from the environment."""
-    value = os.getenv(API_KEY_ENV) or os.getenv(FALLBACK_KEY_ENV)
-    if not value:
-        return None
-    trimmed = value.strip()
-    return trimmed or None
+    return openrouter_client.resolve_api_key_from_env()
 
 
 def _resolve_provider() -> Optional[str]:
     """Return the explicit provider override when set."""
-    value = os.getenv(PROVIDER_ENV)
-    if not value:
-        return None
-    trimmed = value.strip()
-    return trimmed or None
-
-
-def _resolve_base_url() -> Optional[str]:
-    """Return the explicit base URL override when set."""
-    value = os.getenv(BASE_URL_ENV)
-    if value is None:
-        return None
-    trimmed = value.strip()
-    return trimmed or None
+    return openrouter_client.resolve_provider_from_env()
 
 
 def _resolve_mode() -> Optional[Mode]:
@@ -78,8 +63,8 @@ def _derive_model_id(model: Optional[str], provider_id: Optional[str]) -> str:
     if model:
         return model
     if provider_id:
-        if provider_id.startswith("openrouter/"):
-            return provider_id.split("/", 1)[1]
+        if openrouter_client.is_openrouter(provider_id):
+            return openrouter_client.provider_model_hint(provider_id)
         if provider_id.startswith("openai/"):
             return provider_id.split("/", 1)[1]
         return provider_id
@@ -89,18 +74,9 @@ def _derive_model_id(model: Optional[str], provider_id: Optional[str]) -> str:
 def _build_client(
     api_key: str,
     provider_id: str,
-    base_url: Optional[str],
     mode: Optional[Mode],
 ) -> Any:
-    """Create an Instructor client for the resolved provider."""
-    if base_url or lmstudio_client.is_lmstudio_provider(provider_id):
-        normalized_base = lmstudio_client.normalize_base_url(base_url)
-        resolved_mode = mode or lmstudio_client.LMSTUDIO_DEFAULT_MODE
-        return lmstudio_client.build_client(
-            api_key=api_key,
-            base_url=normalized_base,
-            mode=resolved_mode,
-        )
+    """Create an Instructor client using the OpenRouter settings."""
     return openrouter_client.build_client(
         api_key=api_key,
         provider_id=provider_id,
@@ -160,19 +136,17 @@ class ReActAgent:
         temperature: float = 0.1,
         max_steps: int = 6,
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
         provider_id: Optional[str] = None,
     ) -> None:
-        profile = resolve_profile()  # Load provider defaults from providers.ini.
+        base_profile = resolve_profile()  # Load provider defaults from providers.ini.
+        profile = base_profile if openrouter_client.is_openrouter(base_profile.provider_id) else resolve_profile("openrouter")
+        # Always pivot to OpenRouter defaults so this agent talks to the expected service.
         env_provider = _resolve_provider()  # Let env override the provider.
-        env_base_url = _resolve_base_url()  # Let env override the base URL.
         env_mode = _resolve_mode()  # Let env override the mode.
         env_model = resolved_model_from_env()  # Allow env to override the model id.
         using_profile_defaults = (
             provider_id is None
-            and base_url is None
             and env_provider is None
-            and env_base_url is None
             and env_mode is None
             and env_model is None
         )  # Only rely on the profile when nothing else is set.
@@ -182,17 +156,9 @@ class ReActAgent:
             or profile.provider_id
             or openrouter_client.DEFAULT_OPENROUTER_PROVIDER
         )
-        if base_url is not None:
-            resolved_base_url = base_url
-        elif env_base_url is not None:
-            resolved_base_url = env_base_url
-        elif using_profile_defaults:
-            resolved_base_url = profile.base_url
-        else:
-            resolved_base_url = None
-
-        if resolved_base_url and lmstudio_client.is_lmstudio_provider(resolved_provider):
-            resolved_base_url = lmstudio_client.normalize_base_url(resolved_base_url)
+        if not openrouter_client.is_openrouter(resolved_provider):
+            # Enforce the OpenRouter contract even when a non-OpenRouter id slips in.
+            resolved_provider = profile.provider_id or openrouter_client.DEFAULT_OPENROUTER_PROVIDER
 
         resolved_api_key = (
             api_key
@@ -206,19 +172,7 @@ class ReActAgent:
         if explicit_model:
             resolved_model = explicit_model
         else:
-            fallback_model = _derive_model_id(None, resolved_provider)
-            if (
-                using_profile_defaults
-                and resolved_base_url
-                and lmstudio_client.is_lmstudio_provider(resolved_provider)
-            ):
-                resolved_model = lmstudio_client.discover_model_id(
-                    resolved_base_url,
-                    resolved_api_key,
-                    fallback_model,
-                )
-            else:
-                resolved_model = fallback_model
+            resolved_model = _derive_model_id(None, resolved_provider)
 
         if using_profile_defaults and profile.mode:
             resolved_mode = profile.mode
@@ -227,10 +181,22 @@ class ReActAgent:
         else:
             resolved_mode = None
 
+        if resolved_mode and openrouter_client.is_openrouter(resolved_provider):
+            # OpenRouter rejects JSON_SCHEMA, so we align with its JSON expectation.
+            resolved_mode = openrouter_client.normalize_mode(resolved_mode)
+
+        if resolved_mode is None and openrouter_client.is_openrouter(resolved_provider):
+            fallback_mode = profile.mode or Mode.TOOLS
+            resolved_mode = openrouter_client.normalize_mode(fallback_mode)
+
+        mode_label = resolved_mode.name if resolved_mode else "provider default"
+        print(f"ReActAgent provider: {resolved_provider}")
+        print(f"ReActAgent model: {resolved_model}")
+        print(f"ReActAgent mode: {mode_label}")
+
         self.client = _build_client(
             api_key=resolved_api_key,
             provider_id=resolved_provider,
-            base_url=resolved_base_url,
             mode=resolved_mode,
         )
         self.model_id = resolved_model
@@ -347,35 +313,9 @@ class ReActAgent:
         raise RuntimeError("Reached max steps without a final answer")
 
 
-class CalcArgs(BaseModel):
-    expr: str
-
-OPS = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv, ast.Pow: op.pow, ast.USub: op.neg}
-
-def _eval_expression(node: ast.AST) -> float:
-    """Evaluate a safe arithmetic AST node."""
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return float(node.value)
-    if isinstance(node, ast.UnaryOp) and type(node.op) in OPS:
-        return OPS[type(node.op)](_eval_expression(node.operand))
-    if isinstance(node, ast.BinOp) and type(node.op) in OPS:
-        left = _eval_expression(node.left)
-        right = _eval_expression(node.right)
-        return OPS[type(node.op)](left, right)
-    raise ValueError("Unsupported expression")
-
-
-def calculate(raw_args: Dict[str, Any]) -> Dict[str, Any]:
-    args = CalcArgs(**raw_args)
-    parsed = ast.parse(args.expr, mode="eval")
-    value = _eval_expression(parsed.body)
-    return {"expr": args.expr, "value": value}
-
-
 if __name__ == "__main__":
-    # The default constructor now targets LMStudio, so no explicit key is required here.
+    # Set the OpenRouter API key in the environment before running this quick demo.
     agent = ReActAgent()
-    calculate_tool = ToolSpec(name="calculate", description="Evaluate a mathematical expression.", response_model=CalcArgs, handler=calculate)
-    agent.add_tool(calculate_tool)
+    agent.add_tool(build_calculator_tool())
     agent.run("Find the value of 42 + 3")
     print(agent.messages)

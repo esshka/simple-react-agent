@@ -48,9 +48,16 @@ def normalize_base_url(value: Optional[str]) -> str:
 def build_client(api_key: str, base_url: Optional[str] = None, mode: Optional[Mode] = None) -> Any:
     """Create an Instructor client pointed at LMStudio."""
     resolved_base_url = normalize_base_url(base_url)
-    resolved_mode = mode or LMSTUDIO_DEFAULT_MODE
+    resolved_mode = normalize_mode(mode or LMSTUDIO_DEFAULT_MODE)
     openai_client = OpenAI(api_key=api_key, base_url=resolved_base_url)
     return instructor.from_openai(openai_client, mode=resolved_mode)
+
+
+def normalize_mode(value: Optional[Mode]) -> Optional[Mode]:
+    """Align the requested mode with the subset supported by Instructor.from_openai."""
+    if value == Mode.JSON_SCHEMA:
+        return Mode.JSON
+    return value
 
 
 def discover_model_id(base_url: Optional[str], api_key: str, fallback: str) -> str:
@@ -184,6 +191,7 @@ __all__ = [
     "is_lmstudio_provider",
     "probe_connection",
     "normalize_base_url",
+    "normalize_mode",
     "main",
 ]
 
