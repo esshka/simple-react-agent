@@ -9,13 +9,14 @@ from pathlib import Path
 import sys
 
 if __package__ in {None, ''}:
+    # Ensure direct execution can resolve the src/ package namespace.
     project_src = Path(__file__).resolve().parent.parent.parent
     if str(project_src) not in sys.path:
         sys.path.insert(0, str(project_src))
 
-import json
-import os
-from typing import Any, Dict, List, Optional, Tuple, Literal, Union
+from simple_or_agent.instructor_based import simple_client
+
+from typing import Any, Dict, List, Optional, Tuple
 
 from instructor import Mode
 from pydantic import BaseModel
@@ -26,37 +27,12 @@ from simple_or_agent.instructor_based.prompt_manager import (
 )
 from simple_or_agent.instructor_based import openrouter_client
 from simple_or_agent.instructor_based.calculator_tool import build_calculator_tool
-from simple_or_agent.instructor_based.provider_profiles import resolve_profile, resolved_model_from_env
+from simple_or_agent.instructor_based.provider_profiles import resolve_profile
 from simple_or_agent.instructor_based.tools import ToolRegistry, ToolSpec
-
-MODE_ENV = "INSTRUCTOR_MODE"
-
 
 def _resolve_api_key() -> Optional[str]:
     """Read the preferred API key from the environment."""
     return openrouter_client.resolve_api_key_from_env()
-
-
-def _resolve_provider() -> Optional[str]:
-    """Return the explicit provider override when set."""
-    return openrouter_client.resolve_provider_from_env()
-
-
-def _resolve_mode() -> Optional[Mode]:
-    """Map INSTRUCTOR_MODE to an Instructor Mode enum value."""
-    raw = os.getenv(MODE_ENV)
-    if not raw:
-        return None
-    candidate = raw.strip()
-    if not candidate:
-        return None
-    try:
-        return Mode[candidate.upper()]
-    except KeyError:
-        names = ", ".join(member.name for member in Mode)
-        print(f"Unknown INSTRUCTOR_MODE '{raw}'. Valid options: {names}")
-        return None
-
 
 def _derive_model_id(model: Optional[str], provider_id: Optional[str]) -> str:
     """Return the completion model id based on the hints provided."""
@@ -83,17 +59,22 @@ def _build_client(
         mode=mode,
     )
 
-class FinalAnswer(BaseModel):
-    """Final answer response"""
-    type: Literal["final"] = "final"
-    answer: str
 
+def _build_simple_client(
+    api_key: str,
+) -> Any:
+    return simple_client.build_chat_client(
+        api_key=api_key,
+    )
 
 class ThinkResponse(BaseModel):
     """Thought response"""
-    type: Literal["think"] = "think"
+    is_final: bool
     thoughts: str
 
+class ObservationResponse(BaseModel):
+    """Observation response"""
+    observation: str
 
 class ReActAgent:
     """Minimal ReAct loop that works."""
@@ -109,18 +90,8 @@ class ReActAgent:
         base_profile = resolve_profile()  # Load provider defaults from providers.ini.
         profile = base_profile if openrouter_client.is_openrouter(base_profile.provider_id) else resolve_profile("openrouter")
         # Always pivot to OpenRouter defaults so this agent talks to the expected service.
-        env_provider = _resolve_provider()  # Let env override the provider.
-        env_mode = _resolve_mode()  # Let env override the mode.
-        env_model = resolved_model_from_env()  # Allow env to override the model id.
-        using_profile_defaults = (
-            provider_id is None
-            and env_provider is None
-            and env_mode is None
-            and env_model is None
-        )  # Only rely on the profile when nothing else is set.
         resolved_provider = (
             provider_id
-            or env_provider
             or profile.provider_id
             or openrouter_client.DEFAULT_OPENROUTER_PROVIDER
         )
@@ -131,31 +102,22 @@ class ReActAgent:
         resolved_api_key = (
             api_key
             or _resolve_api_key()
-            or (profile.default_api_key if using_profile_defaults else None)
+            or profile.default_api_key
         )
         if not resolved_api_key:
             raise ValueError("api_key is required for ReActAgent")
 
-        explicit_model = model or env_model or (profile.model_id if using_profile_defaults else None)
+        explicit_model = model or profile.model_id
         if explicit_model:
             resolved_model = explicit_model
         else:
             resolved_model = _derive_model_id(None, resolved_provider)
 
-        if using_profile_defaults and profile.mode:
-            resolved_mode = profile.mode
-        elif env_mode is not None:
-            resolved_mode = env_mode
-        else:
-            resolved_mode = None
-
-        if resolved_mode and openrouter_client.is_openrouter(resolved_provider):
-            # OpenRouter rejects JSON_SCHEMA, so we align with its JSON expectation.
-            resolved_mode = openrouter_client.normalize_mode(resolved_mode)
-
-        if resolved_mode is None and openrouter_client.is_openrouter(resolved_provider):
+        if openrouter_client.is_openrouter(resolved_provider):
             fallback_mode = profile.mode or Mode.TOOLS
             resolved_mode = openrouter_client.normalize_mode(fallback_mode)
+        else:
+            resolved_mode = profile.mode
 
         mode_label = resolved_mode.name if resolved_mode else "provider default"
         print(f"ReActAgent provider: {resolved_provider}")
@@ -167,6 +129,11 @@ class ReActAgent:
             provider_id=resolved_provider,
             mode=resolved_mode,
         )
+
+        self.simple_client = _build_simple_client(
+            api_key=resolved_api_key,
+        )
+
         self.model_id = resolved_model
         self.temperature = temperature
         self.max_steps = max(1, int(max_steps))
@@ -187,6 +154,7 @@ class ReActAgent:
     def _refresh_system_prompt(self) -> None:
         """Update the stored system prompt so the model sees the latest tool list."""
         prompt = self._render_system_prompt()
+        print(f"Refreshing system prompt: {prompt}")
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = prompt
             return
@@ -195,33 +163,38 @@ class ReActAgent:
 
     def _render_system_prompt(self) -> str:
         """Render the prompt template with the current tool block."""
-        return render_system_prompt(self._system_prompt_template, self._tools.as_mapping())
+        print(f"Rendering system prompt: {self._system_prompt_template}")
+        tool_names = self._tools.tool_names()
+        print(f"Tool names: {tool_names}")
+        return render_system_prompt(self._system_prompt_template, tool_names)
 
-    def think(self) -> Union[ThinkResponse, FinalAnswer]:
+    def think(self) -> ThinkResponse:
+
+        print(f"Thinking about the current user question or observation.")
+        print(f"Messages: {self.messages}")
         self.messages.append({
             "role": "user",
             "content": (
-                "Reflect on the current question or observation.\n"
-                "Reply with ThinkResponse when you need another step.\n"
-                "Reply with FinalAnswer when the solution is ready.\n"
-                "Do not call any action tool in this step."
+                "Think about current user question or last observation and plan next steps. We have following tools available: " + ", ".join(self._tools.tool_names()) + ". Do you need to call any tool on next step or do you have the answer already? Respond using ThinkResponse. You are allowed to call ThinkResponse only once. You will be allowed to call available tools on next step."
             ),
         })
         return self.client.chat.completions.create(
             model=self.model_id,
             messages=self.messages,
-            response_model=Union[ThinkResponse, FinalAnswer],
+            response_model=ThinkResponse,
         )
         
     def action(self) -> Tuple[str, ToolSpec, BaseModel]:
         if not self._tools.has_tools():
             raise RuntimeError("No tools registered for this agent")
 
+        print(f"Actioning the current user question or observation.")
+        print(f"Messages: {self.messages}")
+
         self.messages.append({
             "role": "user",
             "content": (
-                "Pick one available tool and call it exactly once.\n"
-                "Provide every required field in the JSON you return."
+                "Respond with the tool you want to call. You are allowed to call only one tool on this step."
             ),
         })
 
@@ -232,12 +205,18 @@ class ReActAgent:
             response_model=available_tool_response_models,
         )
 
+        print(f"Action response: {response}")
+
         # Identify which tool the language model implied by checking the response type.
         tool_name, spec = self._tools.resolve(response)
         return tool_name, spec, response
        
 
-    def observation(self) -> str:
+    def observation(self) -> ObservationResponse:
+
+        print(f"Observing the current user question or observation.")
+        print(f"Messages: {self.messages}")
+
         self.messages.append({
             "role": "user",
             "content": (
@@ -247,6 +226,7 @@ class ReActAgent:
         return self.client.chat.completions.create(
             model=self.model_id,
             messages=self.messages,
+            response_model=ObservationResponse,
         )
 
     def run(self, prompt: str) -> str:
@@ -262,15 +242,14 @@ class ReActAgent:
             # ReAct step order: Thought -> Action -> Observation.
             think_response = self.think()
 
-            if think_response.type == "final":
-                final_answer = think_response.answer
-                self.messages.append({"role": "assistant", "content": final_answer})
+            print(f"Think response: {think_response}")
+
+            if think_response.is_final:
+                final_answer = think_response.thoughts
+                self.messages.append({"role": "assistant", "content": "Final answer: " + final_answer})
                 return final_answer
 
-            if think_response.type != "think":
-                raise ValueError("Invalid think response")
-
-            self.messages.append({"role": "assistant", "content": think_response.thoughts})
+            self.messages.append({"role": "assistant", "content": "Thought: " + think_response.thoughts})
 
             if not self._tools.has_tools():
                 raise RuntimeError("No tools registered for this agent")
@@ -280,7 +259,7 @@ class ReActAgent:
             self.messages.append({"role": "assistant", "content": f"Action: {tool_name} -> {payload_dict}"})
 
             observation_response = self.observation()
-            self.messages.append({"role": "assistant", "content": observation_response})
+            self.messages.append({"role": "assistant", "content": "Observation: " + observation_response.observation})
 
         raise RuntimeError("Reached max steps without a final answer")
 
@@ -289,5 +268,5 @@ if __name__ == "__main__":
     # Set the OpenRouter API key in the environment before running this quick demo.
     agent = ReActAgent()
     agent.add_tool(build_calculator_tool())
-    agent.run("Find the value of 42 + 3")
-    print(agent.messages)
+    agent.run("Find the exact value of log(1234234)")
+    print(agent.messages)   

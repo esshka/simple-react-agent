@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from types import MappingProxyType
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type, Union
+from typing_extensions import List
 
 from pydantic import BaseModel
 
@@ -60,6 +61,10 @@ class ToolRegistry:
             raise RuntimeError("No tools registered")
         models = [spec.model_class() for spec in self._tools.values()]
         return models[0] if len(models) == 1 else Union[*models]
+
+    def tool_names(self) -> List[str]:
+        """Return the names of all registered tools."""
+        return list(self._tools.keys())
 
     def resolve(self, payload: BaseModel) -> Tuple[str, ToolSpec]:
         """Identify which tool produced the payload."""

@@ -21,7 +21,7 @@ from instructor import Mode
 from openai import OpenAI
 from pydantic import BaseModel
 
-from simple_or_agent.instructor_based.provider_profiles import resolve_profile, resolved_model_from_env
+from simple_or_agent.instructor_based.provider_profiles import resolve_profile
 
 LMSTUDIO_PROVIDER_PREFIX = "openai/lmstudio"
 LMSTUDIO_DEFAULT_BASE_URL = "http://100.66.248.94:1234/v1"
@@ -31,7 +31,6 @@ LMSTUDIO_DEFAULT_API_KEY = "lm-studio"
 API_KEY_ENV = "INSTRUCTOR_API_KEY"
 FALLBACK_KEY_ENV = "OPENROUTER_API_KEY"
 BASE_URL_ENV = "INSTRUCTOR_BASE_URL"
-MODE_ENV = "INSTRUCTOR_MODE"
 
 
 def normalize_base_url(value: Optional[str]) -> str:
@@ -112,22 +111,6 @@ def _resolve_base_url() -> Optional[str]:
     return trimmed or None
 
 
-def _resolve_mode() -> Optional[Mode]:
-    """Map INSTRUCTOR_MODE to an Instructor Mode enum value."""
-    raw = os.getenv(MODE_ENV)
-    if not raw:
-        return None
-    candidate = raw.strip()
-    if not candidate:
-        return None
-    try:
-        return Mode[candidate.upper()]
-    except KeyError:
-        names = ", ".join(member.name for member in Mode)
-        print(f"Unknown INSTRUCTOR_MODE '{raw}'. Valid options: {names}")
-        return None
-
-
 def main() -> int:
     """Allow quick manual checks against a running LMStudio server."""
     profile = resolve_profile()
@@ -140,7 +123,7 @@ def main() -> int:
         print("Client build failed: Missing API key. Set INSTRUCTOR_API_KEY or OPENROUTER_API_KEY.")
         return 1
 
-    mode = _resolve_mode() or profile.mode or LMSTUDIO_DEFAULT_MODE
+    mode = profile.mode or LMSTUDIO_DEFAULT_MODE
 
     if not probe_connection(resolved_base_url, api_key):
         print(f"Could not reach LMStudio. Confirm the server is running at {resolved_base_url}.")
@@ -152,7 +135,7 @@ def main() -> int:
         print(f"Client build failed: {exc}")
         return 3
 
-    model_override = resolved_model_from_env()
+    model_override = profile.model_id
     if model_override:
         model_id = model_override
     else:

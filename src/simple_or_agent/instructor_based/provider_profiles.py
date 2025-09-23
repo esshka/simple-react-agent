@@ -15,7 +15,6 @@ from typing import Dict, Iterable, Optional
 from instructor import Mode
 
 PROFILE_ENV = "INSTRUCTOR_PROFILE"
-MODEL_ENV = "INSTRUCTOR_MODEL_ID"
 DEFAULT_PROFILE = "lmstudio"
 CONFIG_PATH = Path(__file__).with_name("providers.ini")
 
@@ -36,7 +35,7 @@ class ProviderProfile:
             "INSTRUCTOR_PROVIDER_ID": self.provider_id,
             "INSTRUCTOR_BASE_URL": self.base_url,
             "INSTRUCTOR_MODE": self.mode.name if self.mode else None,
-            MODEL_ENV: self.model_id,
+            "INSTRUCTOR_MODEL_ID": self.model_id,
             "INSTRUCTOR_API_KEY": self.default_api_key,
         }
 
@@ -103,15 +102,6 @@ def resolve_profile(name: Optional[str] = None) -> ProviderProfile:
     return profile
 
 
-def resolved_model_from_env() -> Optional[str]:
-    """Return the explicit model override if present."""
-    raw = os.getenv(MODEL_ENV)
-    if not raw:
-        return None
-    trimmed = raw.strip()
-    return trimmed or None
-
-
 def format_shell_exports(profile: ProviderProfile) -> str:
     """Return shell commands that apply the profile env in one go."""
     lines = [f"# Active profile: {profile.name}"]
@@ -152,12 +142,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
 __all__ = [
     "PROFILE_ENV",
-    "MODEL_ENV",
     "DEFAULT_PROFILE",
     "available_profiles",
     "format_shell_exports",
     "resolve_profile",
-    "resolved_model_from_env",
 ]
 
 

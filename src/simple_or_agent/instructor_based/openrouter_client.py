@@ -21,12 +21,10 @@ import instructor
 from instructor import Mode
 from pydantic import BaseModel
 
-from simple_or_agent.instructor_based.provider_profiles import resolve_profile, resolved_model_from_env
+from simple_or_agent.instructor_based.provider_profiles import resolve_profile
 
 DEFAULT_OPENROUTER_PROVIDER = "openrouter/openai/gpt-oss-20b"
-PROVIDER_ENV = "INSTRUCTOR_PROVIDER_ID"
 API_KEY_ENV = "INSTRUCTOR_API_KEY"
-MODE_ENV = "INSTRUCTOR_MODE"
 FALLBACK_KEY_ENV = "OPENROUTER_API_KEY"
 
 
@@ -182,14 +180,6 @@ def _resolve_api_key() -> Optional[str]:
     return value.strip() or None
 
 
-def _resolve_provider() -> Optional[str]:
-    value = os.getenv(PROVIDER_ENV)
-    if not value:
-        return None
-    trimmed = value.strip()
-    return trimmed or None
-
-
 def _normalize_mode(value: Optional[Mode]) -> Optional[Mode]:
     """Coerce unsupported OpenRouter modes into the closest valid value."""
     if value == Mode.JSON_SCHEMA:
@@ -197,35 +187,9 @@ def _normalize_mode(value: Optional[Mode]) -> Optional[Mode]:
     return value
 
 
-def _resolve_mode() -> Optional[Mode]:
-    raw = os.getenv(MODE_ENV)
-    if not raw:
-        return None
-    candidate = raw.strip()
-    if not candidate:
-        return None
-    print(f"Candidate: {candidate}")
-    try:
-        return _normalize_mode(Mode[candidate.upper()])
-    except KeyError:
-        names = ", ".join(member.name for member in Mode)
-        print(f"Unknown INSTRUCTOR_MODE '{raw}'. Valid options: {names}")
-        return None
-
-
 def resolve_api_key_from_env() -> Optional[str]:
     """Return the OpenRouter API key configured via environment variables."""
     return _resolve_api_key()
-
-
-def resolve_provider_from_env() -> Optional[str]:
-    """Return the OpenRouter provider override configured via environment variables."""
-    return _resolve_provider()
-
-
-def resolve_mode_from_env() -> Optional[Mode]:
-    """Return the OpenRouter mode override configured via environment variables."""
-    return _resolve_mode()
 
 
 def normalize_mode(value: Optional[Mode]) -> Optional[Mode]:
@@ -238,17 +202,16 @@ def main() -> int:
     if not is_openrouter(profile.provider_id):
         profile = resolve_profile("openrouter")
 
-    provider = _resolve_provider() or profile.provider_id or DEFAULT_OPENROUTER_PROVIDER
+    provider = profile.provider_id or DEFAULT_OPENROUTER_PROVIDER
     api_key = _resolve_api_key() or profile.default_api_key
     if not api_key:
         print("Client build failed: Missing API key. Set INSTRUCTOR_API_KEY or OPENROUTER_API_KEY.")
         return 1
 
     print(f"Profile mode: {profile.mode}")
-    print(f"Resolve mode: {_resolve_mode()}")
-    mode = _normalize_mode(_resolve_mode() or profile.mode)
+    mode = _normalize_mode(profile.mode)
     print(f"Mode: {mode}")
-    model_override = resolved_model_from_env() or profile.model_id
+    model_override = profile.model_id
     print(f"Model override: {model_override}")
     return run_example(
         api_key=api_key,
@@ -266,8 +229,6 @@ __all__ = [
     "run_example",
     "main",
     "resolve_api_key_from_env",
-    "resolve_provider_from_env",
-    "resolve_mode_from_env",
     "normalize_mode",
 ]
 
