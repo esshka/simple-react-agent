@@ -18,9 +18,8 @@ from simple_or_agent.instructor_based.prompt_manager import (
 )
 from simple_or_agent.instructor_based import instructor_client as instructor_helpers
 from simple_or_agent.instructor_based.instructor_client import build_instructor_client
+from simple_or_agent.instructor_based.provider_profiles import resolve_profile
 from simple_or_agent.instructor_based.tools import ToolRegistry, ToolSpec
-
-DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def _derive_model_id(model: Optional[str], provider_id: Optional[str]) -> str:
@@ -98,34 +97,33 @@ class ReActAgent:
         base_url: Optional[str] = None,
         provider_id: Optional[str] = None,
     ) -> None:
-        # When the caller does not provide a provider or base URL we assume LMStudio.
-        using_lmstudio_defaults = provider_id is None and base_url is None
-
-        resolved_provider = provider_id or instructor_helpers._default_lmstudio_provider()
-        resolved_base_url = (
-            base_url
-            if base_url is not None
-            else (
-                instructor_helpers._default_lmstudio_base_url()
-                if using_lmstudio_defaults
-                else None
-            )
-        )
+        profile = resolve_profile()  # Load provider defaults from providers.ini.
+        env_provider = instructor_helpers._resolve_provider()  # Let env override the provider.
+        env_base_url = instructor_helpers._resolve_base_url()  # Let env override the base URL.
+        env_mode = instructor_helpers._resolve_mode()  # Let env override the mode.
+        using_profile_defaults = (
+            provider_id is None and base_url is None and env_provider is None and env_base_url is None
+        )  # Only rely on the profile when nothing else is set.
+        resolved_provider = provider_id or env_provider or profile.provider_id
+        if base_url is not None:
+            resolved_base_url = base_url
+        elif env_base_url is not None:
+            resolved_base_url = env_base_url
+        elif using_profile_defaults:
+            resolved_base_url = profile.base_url
+        else:
+            resolved_base_url = None
 
         resolved_api_key = (
             api_key
             or instructor_helpers._resolve_api_key()
-            or (
-                instructor_helpers.LMSTUDIO_DEFAULT_API_KEY
-                if using_lmstudio_defaults
-                else None
-            )
+            or (profile.default_api_key if using_profile_defaults else None)
         )
         if not resolved_api_key:
             raise ValueError("api_key is required for ReActAgent")
 
         fallback_model = _derive_model_id(model, resolved_provider)
-        if using_lmstudio_defaults and not model:
+        if using_profile_defaults and not model and resolved_base_url:
             resolved_model = instructor_helpers._discover_model_id(
                 resolved_base_url,
                 resolved_api_key,
@@ -134,14 +132,11 @@ class ReActAgent:
         else:
             resolved_model = fallback_model
 
-        build_kwargs: Dict[str, Any] = {
-            "api_key": resolved_api_key,
-            "provider_id": resolved_provider,
-            "base_url": resolved_base_url,
-        }
-        if using_lmstudio_defaults:
-            # LMStudio works best in JSON schema mode so we enable it by default.
-            build_kwargs["mode"] = instructor_helpers.LMSTUDIO_DEFAULT_MODE
+        build_kwargs: Dict[str, Any] = {"api_key": resolved_api_key, "provider_id": resolved_provider, "base_url": resolved_base_url}
+        if using_profile_defaults and profile.mode:
+            build_kwargs["mode"] = profile.mode
+        elif env_mode is not None:
+            build_kwargs["mode"] = env_mode
 
         self.client = build_instructor_client(**build_kwargs)
         self.model_id = resolved_model

@@ -5,6 +5,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+if __package__ in {None, ''}:
+    project_src = Path(__file__).resolve().parent.parent.parent
+    if str(project_src) not in sys.path:
+        sys.path.insert(0, str(project_src))
+
 import os
 from typing import Any, Dict, Optional
 
@@ -12,8 +20,9 @@ import instructor
 from instructor import Mode
 from pydantic import BaseModel
 from openai import OpenAI
+from simple_or_agent.instructor_based.provider_profiles import resolve_profile
 
-DEFAULT_PROVIDER_ID = "openrouter/qwen/qwen3-next-80b-a3b-instruct"
+DEFAULT_PROVIDER_ID = "openrouter/openai/gpt-oss-20b"
 
 PROVIDER_ENV = "INSTRUCTOR_PROVIDER_ID"
 BASE_URL_ENV = "INSTRUCTOR_BASE_URL"
@@ -167,17 +176,28 @@ def _probe_connection(base_url: Optional[str], api_key: str) -> bool:
 
 def main() -> int:
     """Allow quick manual client checks from the command line."""
-    provider = _resolve_provider() or _default_lmstudio_provider()
-    base_url = _resolve_base_url() or _default_lmstudio_base_url()
-    mode = _resolve_mode() or LMSTUDIO_DEFAULT_MODE
-    api_key = _resolve_api_key() or LMSTUDIO_DEFAULT_API_KEY
+    profile = resolve_profile()  # Load defaults from providers.ini or env override.
+    env_provider = _resolve_provider()  # Allow manual overrides to stay first-class.
+    env_base_url = _resolve_base_url()  # Callers can override the base URL via env.
+    env_mode = _resolve_mode()  # Mode can also be forced through env variables.
 
-    if not _probe_connection(base_url, api_key):
-        print(
-            "Could not reach LMStudio. Confirm the server is running and accessible at "
-            f"{base_url}."
-        )
-        return 2
+    provider = env_provider or profile.provider_id
+    base_url = env_base_url if env_base_url is not None else profile.base_url
+    mode = env_mode or profile.mode
+
+    api_key = _resolve_api_key() or profile.default_api_key
+    if not api_key:
+        print("Client build failed: Missing API key. Set INSTRUCTOR_API_KEY or OPENROUTER_API_KEY.")
+        return 1
+
+    using_profile_defaults = env_provider is None and env_base_url is None and env_mode is None
+    if profile.name == "lmstudio" and base_url and using_profile_defaults:
+        if not _probe_connection(base_url, api_key):
+            print(
+                "Could not reach LMStudio. Confirm the server is running and accessible at "
+                f"{base_url}."
+            )
+            return 2
 
     try:
         client = build_instructor_client(
@@ -195,9 +215,11 @@ def main() -> int:
         age: int
 
     try:
-        # Ask LMStudio to map a plain sentence into structured data.
+        # Ask the configured provider to map a plain sentence into structured data.
         response = client.chat.completions.create(
-            model=_discover_model_id(base_url, api_key, provider.split("/", 1)[1] if "/" in provider else provider),
+            model=_discover_model_id(
+                base_url, api_key, provider.split("/", 1)[1] if "/" in provider else provider
+            ),
             messages=[{"role": "user", "content": "Ana is 34 years old."}],
             response_model=Person,
         )
@@ -207,8 +229,8 @@ def main() -> int:
         return 4
 
     print(f"Client ready for provider: {provider}")
-    print(f"Base URL: {base_url}")
-    print(f"Mode: {mode.name}")
+    print(f"Base URL: {base_url or 'provider default'}")
+    print(f"Mode: {mode.name if mode else 'provider default'}")
     return 0
 
 
