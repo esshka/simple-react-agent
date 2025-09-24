@@ -66,6 +66,10 @@ class ToolRegistry:
         """Return the names of all registered tools."""
         return list(self._tools.keys())
 
+    def tool_names_and_descriptions(self) -> List[str]:
+        """Return the names and descriptions of all registered tools as list of strings."""
+        return "\n".join([f"{name}: {spec.description}" for name, spec in self._tools.items()])
+
     def resolve(self, payload: BaseModel) -> Tuple[str, ToolSpec]:
         """Identify which tool produced the payload."""
         for name, spec in self._tools.items():
@@ -75,3 +79,10 @@ class ToolRegistry:
 
 
 __all__ = ["ToolRegistry", "ToolSpec"]
+
+
+if __name__ == "__main__":
+    tools = ToolRegistry()
+    tools.add(ToolSpec(name="tool1", description="Tool 1", response_model=None, handler=lambda x: x, args_model=None, parameters=None))
+    tools.add(ToolSpec(name="tool2", description="Tool 2", response_model=None, handler=lambda x: x, args_model=None, parameters=None))
+    print(tools.tool_names_and_descriptions())
