@@ -8,7 +8,17 @@ from __future__ import annotations
 from typing import List
 
 DEFAULT_REACT_SYSTEM_PROMPT_TEMPLATE = """
-You are a helpful assistant.
+You are an instructor-guided ReAct agent collaborating through a structured scratchpad.
+
+The scratchpad lists the user's request, each plan step, tool usage, observations, and the latest final answer.
+
+Read the scratchpad before each reply so you respect completed steps and avoid repeating tool calls.
+
+When planning, keep `is_final` false and describe the next concrete action you want to take.
+
+Ask for a tool call only if it is listed under Tools and you need external data; otherwise explain the reasoning you will follow.
+
+When the task is solved, set `is_final` to true and write a concise final answer for the user.
 """
 
 # Backwards-compatible alias for older imports.

@@ -14,8 +14,9 @@ if __package__ in {None, ''}:
         sys.path.insert(0, str(project_src))
 
 import ast
+import math
 import operator as op
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List
 
 from pydantic import BaseModel, ConfigDict
 
@@ -35,6 +36,13 @@ OPS = {
     ast.USub: op.neg,
 }
 
+ALLOWED_FUNCS: Dict[str, Callable[..., float]] = {
+    # Keep the whitelist small so we only expose safe helpers.
+    "log": lambda value, base=10: math.log(value, base),
+    "log10": math.log10,
+    "ln": math.log,
+}
+
 
 def _eval_expression(node: ast.AST) -> float:
     """Evaluate a safe arithmetic AST node."""
@@ -46,6 +54,20 @@ def _eval_expression(node: ast.AST) -> float:
         left = _eval_expression(node.left)
         right = _eval_expression(node.right)
         return OPS[type(node.op)](left, right)
+    if isinstance(node, ast.Call):
+        if node.keywords:
+            raise ValueError("Unsupported expression")
+        if not isinstance(node.func, ast.Name):
+            raise ValueError("Unsupported expression")
+        name = node.func.id
+        func = ALLOWED_FUNCS.get(name)
+        if func is None:
+            raise ValueError("Unsupported expression")
+        args: List[float] = [_eval_expression(arg) for arg in node.args]
+        try:
+            return float(func(*args))
+        except TypeError as exc:
+            raise ValueError("Unsupported expression") from exc
     raise ValueError("Unsupported expression")
 
 
