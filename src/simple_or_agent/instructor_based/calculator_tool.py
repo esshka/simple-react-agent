@@ -41,6 +41,7 @@ ALLOWED_FUNCS: Dict[str, Callable[..., float]] = {
     "log": lambda value, base=10: math.log(value, base),
     "log10": math.log10,
     "ln": math.log,
+    "sqrt": math.sqrt,
 }
 
 

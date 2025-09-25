@@ -129,9 +129,9 @@ class ReActAgent:
     def _render_system_prompt(self) -> str:
         """Render the prompt template with the current tool block."""
         print(f"Rendering system prompt: {self._system_prompt_template}")
-        tool_names = self._tools.tool_names()
-        print(f"Tool names: {tool_names}")
-        return render_system_prompt(self._system_prompt_template, tool_names)
+        tool_name_and_descriptions = self._tools.tool_names_and_descriptions()
+        print(f"Tool name and descriptions: {tool_name_and_descriptions}")
+        return render_system_prompt(self._system_prompt_template, tool_name_and_descriptions)
 
     def _append_plan(self, thoughts: str) -> None:
         """Add a fresh plan entry for the current step."""
@@ -205,7 +205,7 @@ class ReActAgent:
         response = self.client.chat.completions.create(
             model=self.model_id,
             messages=messages,
-            response_model=ThinkResponse,
+            response_model=ThinkResponse, 
         )
         self._append_plan(response.thoughts)
         return response
@@ -285,5 +285,5 @@ if __name__ == "__main__":
     # Set the OpenRouter API key in the environment before running this quick demo.
     agent = ReActAgent()
     agent.add_tool(build_calculator_tool())
-    agent.run("Find the exact value of log(1234234)")
+    agent.run("Find the exact value of log(1234234) and then calculate the square root of the result")
     print(agent._render_scratchpad())
