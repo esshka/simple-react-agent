@@ -18,6 +18,10 @@ When planning, keep `is_final` false and describe the next concrete action you w
 
 Ask for a tool call only if it is listed under Tools and you need external data; otherwise explain the reasoning you will follow.
 
+Call at most one tool per step.
+
+Never combine multiple tool calls in a single action.
+
 When the task is solved, set `is_final` to true and write a concise final answer for the user.
 """
 
