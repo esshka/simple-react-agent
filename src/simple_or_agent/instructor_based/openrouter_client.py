@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import sys
 
@@ -22,6 +23,9 @@ from instructor import Mode
 from pydantic import BaseModel
 
 from simple_or_agent.instructor_based.provider_profiles import resolve_profile
+
+# Enable Instructor debug logs so we can inspect OpenRouter traffic.
+logging.basicConfig(level=logging.DEBUG)
 
 DEFAULT_OPENROUTER_PROVIDER = "openrouter/openai/gpt-oss-20b"
 API_KEY_ENV = "INSTRUCTOR_API_KEY"
@@ -118,9 +122,10 @@ def run_example(
 
     try:
         response = client.chat.completions.create(
-            model=resolved_model,
+            model="qwen/qwen3-30b-a3b",
             messages=request_messages,
             response_model=Person,
+            extra_body={"provider": {"require_parameters": True}}
         )
     except Exception as exc:
         print(f"Sample request failed: {exc}")
