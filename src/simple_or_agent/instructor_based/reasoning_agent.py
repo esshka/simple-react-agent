@@ -2,7 +2,6 @@
 # Implements a structured reasoning agent with optional tool calls.
 # Exists to provide a reusable Instructor loop that mirrors the ReAct agent features.
 # RELEVANT FILES: src/simple_or_agent/instructor_based/agent.py, src/simple_or_agent/instructor_based/openrouter_client.py, src/simple_or_agent/instructor_based/tools.py
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,7 +14,7 @@ if __package__ in {None, ""}:
 
 import json
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 from instructor import Mode
 from pydantic import BaseModel, Field
@@ -24,15 +23,12 @@ from simple_or_agent.instructor_based import openrouter_client
 from simple_or_agent.instructor_based.agent import ObservationResponse
 from simple_or_agent.instructor_based.provider_profiles import resolve_profile
 from simple_or_agent.instructor_based.tools import ToolRegistry, ToolSpec
-from simple_or_agent.instructor_based.calculator_tool import build_calculator_tool
-
 
 class NextAction(str, Enum):
     CONTINUE = "continue"
     VALIDATE = "validate"
     FINAL_ANSWER = "final_answer"
     RESET = "reset"
-
 
 class ReasoningStep(BaseModel):
     title: Optional[str] = Field(None, description="Short step title.")
@@ -43,27 +39,26 @@ class ReasoningStep(BaseModel):
     next_action: Optional[NextAction] = Field(None, description="continue, validate, final_answer, or reset.")
     confidence: Optional[float] = Field(None, description="Confidence score between 0.0 and 1.0.")
 
-
 class ReasoningSteps(BaseModel):
     reasoning_steps: List[ReasoningStep] = Field(..., description="Ordered reasoning steps.")
+class MaybeToolCall(BaseModel):
+    result: Optional[Dict[str, Any]] = Field(default=None, description="Tool arguments when the call is valid.")
+    error: bool = Field(default=False, description="True when the tool call failed.")
+    message: Optional[str] = Field(default=None, description="Explanation of what went wrong.")
 
 def get_system_prompt(min_steps: int = 1, max_steps: int = 10) -> str:
     return f"""\
     You are a meticulous, thoughtful, and logical Reasoning Agent who solves complex problems through clear, structured, step-by-step analysis.\n
-
     Step 1 - Problem Analysis:
         - Restate the user's task clearly in your own words to ensure full comprehension.
         - Identify explicitly what information is required and what tools or resources might be necessary.
-
         Step 2 - Decompose and Strategize:
         - Break down the problem into clearly defined subtasks.
         - Develop at least two distinct strategies or approaches to solving the problem to ensure thoroughness.
-
         Step 3 - Intent Clarification and Planning:
         - Clearly articulate the user's intent behind their request.
         - Select the most suitable strategy from Step 2, clearly justifying your choice based on alignment with the user's intent and task constraints.
         - Formulate a detailed step-by-step action plan outlining the sequence of actions needed to solve the problem.
-
         Step 4 - Execute the Action Plan:
         For each planned step, document:
         1. **Title**: Concise title summarizing the step.
@@ -81,18 +76,15 @@ def get_system_prompt(min_steps: int = 1, max_steps: int = 10) -> str:
             - **final_answer**: Only if you have confidently validated the solution.
             - **reset**: Immediately restart analysis if a critical error or incorrect result is identified.
         7. **Confidence Score**: Provide a numeric confidence score (0.0–1.0) indicating your certainty in the step's correctness and its outcome.
-
         Step 5 - Validation (mandatory before finalizing an answer):
         - Explicitly validate your solution by:
             - Cross-verifying with alternative approaches (developed in Step 2).
             - Using additional available tools or methods to independently confirm accuracy.
         - Clearly document validation results and reasoning behind the validation method chosen.
         - If validation fails or discrepancies arise, explicitly identify errors, reset your analysis, and revise your plan accordingly.
-
         Step 6 - Provide the Final Answer:
         - Once thoroughly validated and confident, deliver your solution clearly and succinctly.
         - Restate briefly how your answer addresses the user's original intent and resolves the stated task.
-
         General Operational Guidelines:
         - Ensure your analysis remains:
             - **Complete**: Address all elements of the task.
@@ -105,8 +97,6 @@ def get_system_prompt(min_steps: int = 1, max_steps: int = 10) -> str:
         - Execute necessary tools proactively and without hesitation, clearly documenting tool usage.
         - Only create a single instance of ReasoningSteps for your response.\
     """
-
-
 class ReasoningAgent:
     def __init__(
         self,
@@ -150,14 +140,12 @@ class ReasoningAgent:
         self._prompt_template = get_system_prompt(self.min_steps, self.max_steps)
         self._system_prompt = self._compose_system_prompt()
         self._steps: List[ReasoningStep] = []
-
     def _compose_system_prompt(self) -> str:
         base = self._prompt_template.strip()
         catalog = self._tools.tool_names_and_descriptions()
         if catalog:
             base = f"{base}\n\nAvailable tools:\n{catalog}\n\nSet the `tool` field only to one of these names."
         return base
-
     def _history_text(self) -> str:
         if not self._steps:
             return "No steps recorded yet."
@@ -179,14 +167,22 @@ class ReasoningAgent:
                 parts.append(f"Confidence: {step.confidence}")
             blocks.append("\n".join(parts))
         return "\n\n".join(blocks)
-
     def _user_message(self, prompt: str, history: str, *blocks: str) -> str:
         lines = [prompt, "", "Reasoning history:", history]
         for block in blocks:
             if block:
                 lines.extend(["", block])
         return "\n".join(lines)
-
+    def _chat(self, user_content: str, response_model: Type[BaseModel]) -> BaseModel:
+        return self.client.chat.completions.create(
+            model=self.model_id,
+            messages=[
+                {"role": "system", "content": self._system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            response_model=response_model,
+            temperature=self.temperature,
+        )
     def _stringify(self, value: Any) -> str:
         if isinstance(value, BaseModel):
             return json.dumps(value.model_dump(), indent=2, sort_keys=True)
@@ -195,15 +191,12 @@ class ReasoningAgent:
         if isinstance(value, (list, tuple)):
             return json.dumps(list(value), indent=2, sort_keys=True)
         return str(value)
-
     def add_tool(self, tool: ToolSpec) -> None:
         self._tools.add(tool)
         self._system_prompt = self._compose_system_prompt()
-
     def remove_tool(self, name: str) -> None:
         self._tools.remove(name)
         self._system_prompt = self._compose_system_prompt()
-
     def run(self, prompt: str) -> ReasoningSteps:
         if not prompt:
             raise ValueError("Prompt must not be empty.")
@@ -215,14 +208,9 @@ class ReasoningAgent:
                 "Return the next ReasoningStep JSON object. Provide exactly one step. "
                 "If you need to run a tool set `tool` to its exact name and leave `result` empty until the tool is observed."
             )
-            step = self.client.chat.completions.create(
-                model=self.model_id,
-                messages=[
-                    {"role": "system", "content": self._system_prompt},
-                    {"role": "user", "content": self._user_message(prompt, history, directive)},
-                ],
-                response_model=ReasoningStep,
-                temperature=self.temperature,
+            step = self._chat(
+                self._user_message(prompt, history, directive),
+                ReasoningStep,
             )
             self._steps.append(step)
             if step.next_action == NextAction.RESET:
@@ -236,46 +224,54 @@ class ReasoningAgent:
                     raise ValueError("Tool field is present but empty.")
                 if not self._tools.has_tools():
                     raise RuntimeError("A tool was requested but no tools are registered.")
-                if name not in self._tools.as_mapping():
+                tools_map = self._tools.as_mapping()
+                if name not in tools_map:
                     known = ", ".join(self._tools.tool_names()) or "no tools"
                     raise ValueError(f"Unknown tool '{name}'. Known tools: {known}")
-                union_model = self._tools.response_union()
-                payload = self.client.chat.completions.create(
-                    model=self.model_id,
-                    messages=[
-                        {"role": "system", "content": self._system_prompt},
-                        {"role": "user", "content": self._user_message(
-                            prompt,
-                            self._history_text(),
-                            f"Return only the arguments for the `{name}` tool as a JSON object.",
-                        )},
-                    ],
-                    response_model=union_model,
-                    temperature=self.temperature,
+                spec = tools_map[name]
+                maybe = self._chat(
+                    self._user_message(
+                        prompt,
+                        self._history_text(),
+                        (
+                            f"Return a MaybeToolCall JSON object for the `{name}` tool. "
+                            "Populate `result` with the exact arguments when the call is valid. "
+                            "If the call cannot proceed, set `error` to true and explain why in `message`."
+                        ),
+                    ),
+                    MaybeToolCall,
                 )
-                resolved_name, spec = self._tools.resolve(payload)
-                if resolved_name != name:
-                    raise RuntimeError(f"Expected tool '{name}' but model returned '{resolved_name}'.")
-                tool_args = payload.model_dump()
-                tool_result = spec.handler(tool_args)
-                observation = self.client.chat.completions.create(
-                    model=self.model_id,
-                    messages=[
-                        {"role": "system", "content": self._system_prompt},
-                        {"role": "user", "content": self._user_message(
-                            prompt,
-                            self._history_text(),
-                            f"You called `{resolved_name}`.",
-                            f"Tool args:\n{self._stringify(tool_args)}",
-                            f"Tool output:\n{self._stringify(tool_result)}",
-                            "Summarize what this output means and how it affects the plan.",
-                        )},
-                    ],
-                    response_model=ObservationResponse,
-                    temperature=self.temperature,
-                )
-                step.tool = resolved_name
-                step.result = observation.observation  # Record a short observation so the next step can build on it.
+                step.tool = name
+                if maybe.error or maybe.result is None:
+                    failure_note = maybe.message or "Tool call failed without an explanation."
+                    failure_prompt = self._user_message(
+                        prompt,
+                        self._history_text(),
+                        f"Tool `{name}` reported an error.",
+                        f"Error message: {failure_note}",
+                        f"Partial payload: {self._stringify(maybe.result) if maybe.result else 'None available'}",
+                        "Explain how this affects the plan and suggest a next step.",
+                    )
+                    observation = self._chat(
+                        failure_prompt,
+                        ObservationResponse,
+                    )
+                    step.result = observation.observation
+                    continue
+                validated_args = spec.model_class()(**(maybe.result or {}))
+                tool_output = spec.handler(validated_args.model_dump())
+                step.result = self._chat(
+                    self._user_message(
+                        prompt,
+                        self._history_text(),
+                        f"You called `{name}`.",
+                        f"Tool args:\n{self._stringify(validated_args.model_dump())}",
+                        f"Tool output:\n{self._stringify(tool_output)}",
+                        "Summarize what this output means and how it affects the plan.",
+                    ),
+                    ObservationResponse,
+                ).observation
+
             if step.next_action == NextAction.FINAL_ANSWER and len(self._steps) >= self.min_steps:
                 break
         if not self._steps:
@@ -283,7 +279,6 @@ class ReasoningAgent:
         if self._steps[-1].next_action != NextAction.FINAL_ANSWER:
             raise RuntimeError("Reasoning agent stopped without a final answer.")
         return ReasoningSteps(reasoning_steps=self._steps)
-
 
 def run_reasoning_agent(
     prompt: str,
@@ -296,9 +291,10 @@ def run_reasoning_agent(
         agent.add_tool(tool)
     return agent.run(prompt)
 
-
 if __name__ == "__main__":
-    response = run_reasoning_agent("Find the exact value of log(1234234) and then calculate the square root of the result", tools=[build_calculator_tool()])
-    print("Final Answer: ", response.reasoning_steps[-1].result)
-    print("Reasoning Steps: ", response.reasoning_steps)
-    print("\n")
+    from simple_or_agent.instructor_based.calculator_tool import build_calculator_tool
+
+    demo_agent = ReasoningAgent()
+    demo_agent.add_tool(build_calculator_tool())
+    demo_steps = demo_agent.run("Calculate the square root of the base-10 log of 1234234.")
+    print("Final answer:", demo_steps.reasoning_steps[-1].result)
