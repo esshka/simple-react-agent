@@ -51,7 +51,7 @@ def _describe(value: Any) -> Any:
 def build_client(api_key: str, provider_id: Optional[str] = None, mode: Optional[Mode] = None) -> Any:
     """Create an Instructor client that talks to OpenRouter."""
     resolved_provider = provider_id or DEFAULT_OPENROUTER_PROVIDER
-    extra = {}
+    extra: Dict[str, Any] = {}
     normalized_mode = _normalize_mode(mode)
     if normalized_mode:
         extra["mode"] = normalized_mode
