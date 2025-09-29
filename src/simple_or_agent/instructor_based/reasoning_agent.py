@@ -102,7 +102,7 @@ def run_reasoning_agent(prompt: str):
     ]
 
     response = client.chat.completions.create(
-            model="qwen/qwen3-next-80b-a3b-thinking",
+            model="qwen/qwen3-next-80b-a3b-instruct",
             messages=messages,
             response_model=ReasoningSteps,
             extra_body={"provider": {"require_parameters": True}}
@@ -110,9 +110,22 @@ def run_reasoning_agent(prompt: str):
 
     return response
 
+def create_transcript(reasoning_steps: List[ReasoningStep]) -> str:
+    transcript = ""
+    for index, step in enumerate(reasoning_steps):
+        transcript += f"Step {index + 1}: {step.title}\n"
+        transcript += f"Action: {step.action}\n"
+        transcript += f"Result: {step.result}\n"
+        transcript += f"Reasoning: {step.reasoning}\n"
+        transcript += f"Next Action: {step.next_action}\n"
+        transcript += f"Confidence: {step.confidence}\n"
+    return transcript
+
 
 if __name__ == "__main__":
     response = run_reasoning_agent("Given this table defining * on the set S = {a, b, c, d, e}\n\n|*|a|b|c|d|e|\n|---|---|---|---|---|---|\n|a|a|b|c|b|d|\n|b|b|c|a|e|c|\n|c|c|a|b|b|a|\n|d|b|e|b|e|d|\n|e|d|b|a|d|c|\n\nprovide the subset of S involved in any possible counter-examples that prove * is not commutative. Provide your answer as a comma separated list of the elements in the set in alphabetical order.")
     print("Reasoning Steps: ", response.reasoning_steps)
     print("\n")
     print("Final Answer: ", response.reasoning_steps[-1].result)
+    transcript = create_transcript(response.reasoning_steps)
+    print("Transcript: ", transcript)
