@@ -18,9 +18,14 @@ import json
 from typing import Any, Dict, List, Optional, Type
 
 from instructor import Mode
-from instructor.core.exceptions import InstructorRetryException
+from instructor.core.exceptions import (
+    IncompleteOutputException,
+    InstructorRetryException,
+    ProviderError,
+    ValidationError as InstructorValidationError,
+)
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from simple_or_agent.instructor_based.reasoning_models import (
     MaybeToolCall,
@@ -33,6 +38,15 @@ from simple_or_agent.instructor_based.agent import ObservationResponse
 from simple_or_agent.instructor_based.tools import ToolRegistry, ToolSpec
 
 api_key = os.getenv("OPENROUTER_API_KEY")
+
+INSTRUCTOR_ERRORS = (InstructorRetryException, IncompleteOutputException, InstructorValidationError, ProviderError)
+
+
+class LoopInterrupted(RuntimeError):  # Stop the loop when Instructor fails.
+
+    def __init__(self, explanation: str) -> None:
+        super().__init__(explanation)
+        self.explanation = explanation
 
 class ReasoningAgent:
     def __init__(
@@ -98,7 +112,40 @@ class ReasoningAgent:
                 lines.extend(["", block])
         return "\n".join(lines)
 
-    def _chat(self, user_content: str, response_model: Type[BaseModel]) -> BaseModel:
+    def _describe_error(self, stage: str, error: Exception) -> str:  # Build a short explanation for Instructor failures.
+        parts = [
+            f"Instructor call failed while trying to {stage}.",
+            f"Error type: {type(error).__name__}.",
+            f"Message: {error}.",
+        ]
+        if isinstance(error, InstructorRetryException) and getattr(error, "n_attempts", None):
+            parts.append(f"Attempts: {error.n_attempts}.")
+        if isinstance(error, PydanticValidationError):
+            details = "; ".join(item.get("msg", "") for item in error.errors())
+            if details:
+                parts.append(f"Validation detail: {details}.")
+        return " ".join(part for part in parts if part)
+
+    def _interrupt_with_error(self, stage: str, error: Exception) -> None:  # Record failure and stop the loop.
+        explanation = self._describe_error(stage, error)
+        failure_step = ReasoningStep(
+            title="Run interrupted",
+            action="Stop and report the error.",
+            reasoning=explanation,
+            result=explanation,
+            next_action=NextAction.FINAL_ANSWER,
+            confidence=0.0,
+        )
+        self._steps.append(failure_step)
+        raise LoopInterrupted(explanation) from error
+
+    def _chat(
+        self,
+        user_content: str,
+        response_model: Type[BaseModel],
+        *,
+        stage: str,
+    ) -> BaseModel:
         payload: Dict[str, Any] = {
             "messages": [
                 {"role": "system", "content": self._system_prompt},
@@ -110,8 +157,10 @@ class ReasoningAgent:
         }
         try:
             return self.client.chat.completions.create(**payload)
-        except InstructorRetryException as exc:
-            raise RuntimeError(str(exc)) from exc
+        except INSTRUCTOR_ERRORS as exc:
+            self._interrupt_with_error(stage, exc)
+        except PydanticValidationError as exc:
+            self._interrupt_with_error(stage, exc)
 
     def _stringify(self, value: Any) -> str:
         if isinstance(value, BaseModel):
@@ -135,86 +184,93 @@ class ReasoningAgent:
             raise ValueError("Prompt must not be empty.")
         self._system_prompt = self._compose_system_prompt()
         self._steps = []
-        for _ in range(self.max_steps * 2):
-            history = self._history_text()
-            directive = (
-                "Return the next ReasoningStep JSON object. Provide exactly one step. "
-                "If you need to run a tool set `tool` to its exact name and leave "
-                "`result` empty until the tool is observed."
-            )
-            step = self._chat(
-                self._user_message(prompt, history, directive),
-                ReasoningStep,
-            )
-            self._steps.append(step)
-            if step.next_action == NextAction.RESET:
-                self._steps.clear()
-                continue
-            if len(self._steps) > self.max_steps:
-                raise RuntimeError("Exceeded configured max_steps before final answer.")
-            if step.tool:  # Ask the model for structured tool args and run the handler.
-                name = step.tool.strip()
-                if not name:
-                    raise ValueError("Tool field is present but empty.")
-                if not self._tools.has_tools():
-                    raise RuntimeError("A tool was requested but no tools are registered.")
-                tools_map = self._tools.as_mapping()
-                if name not in tools_map:
-                    known = ", ".join(self._tools.tool_names()) or "no tools"
-                    raise ValueError(f"Unknown tool '{name}'. Known tools: {known}")
-                spec = tools_map[name]
-                maybe = self._chat(
-                    self._user_message(
-                        prompt,
-                        self._history_text(),
-                        (
-                            f"Return a MaybeToolCall JSON object for the `{name}` tool. "
-                            "Populate `result` with the exact arguments when the call is valid. "
-                            "If the call cannot proceed, set `error` to true and explain why "
-                            "in `message`."
-                        ),
-                    ),
-                    MaybeToolCall,
+        try:
+            for _ in range(self.max_steps * 2):
+                history = self._history_text()
+                directive = (
+                    "Return the next ReasoningStep JSON object. Provide exactly one step. "
+                    "If you need to run a tool set `tool` to its exact name and leave "
+                    "`result` empty until the tool is observed."
                 )
-                step.tool = name
-                if maybe.error or maybe.result is None:
-                    if maybe.message:
-                        failure_note = self._stringify(maybe.message)
-                    else:
-                        failure_note = "Tool call failed without an explanation."
-                    partial_payload = (
-                        self._stringify(maybe.result) if maybe.result else "None available"
-                    )
-                    failure_prompt = self._user_message(
-                        prompt,
-                        self._history_text(),
-                        f"Tool `{name}` reported an error.",
-                        f"Error message: {failure_note}",
-                        f"Partial payload: {partial_payload}",
-                        "Explain how this affects the plan and suggest a next step.",
-                    )
-                    observation = self._chat(
-                        failure_prompt,
-                        ObservationResponse,
-                    )
-                    step.result = observation.observation
+                step = self._chat(
+                    self._user_message(prompt, history, directive),
+                    ReasoningStep,
+                    stage="generate the next reasoning step",
+                )
+                self._steps.append(step)
+                if step.next_action == NextAction.RESET:
+                    self._steps.clear()
                     continue
-                validated_args = spec.model_class()(**(maybe.result or {}))
-                tool_output = spec.handler(validated_args.model_dump())
-                step.result = self._chat(
-                    self._user_message(
-                        prompt,
-                        self._history_text(),
-                        f"You called `{name}`.",
-                        f"Tool args:\n{self._stringify(validated_args.model_dump())}",
-                        f"Tool output:\n{self._stringify(tool_output)}",
-                        "Summarize what this output means and how it affects the plan.",
-                    ),
-                    ObservationResponse,
-                ).observation
+                if len(self._steps) > self.max_steps:
+                    raise RuntimeError("Exceeded configured max_steps before final answer.")
+                if step.tool:  # Ask the model for structured tool args and run the handler.
+                    name = step.tool.strip()
+                    if not name:
+                        raise ValueError("Tool field is present but empty.")
+                    if not self._tools.has_tools():
+                        raise RuntimeError("A tool was requested but no tools are registered.")
+                    tools_map = self._tools.as_mapping()
+                    if name not in tools_map:
+                        known = ", ".join(self._tools.tool_names()) or "no tools"
+                        raise ValueError(f"Unknown tool '{name}'. Known tools: {known}")
+                    spec = tools_map[name]
+                    maybe = self._chat(
+                        self._user_message(
+                            prompt,
+                            self._history_text(),
+                            (
+                                f"Return a MaybeToolCall JSON object for the `{name}` tool. "
+                                "Populate `result` with the exact arguments when the call is valid. "
+                                "If the call cannot proceed, set `error` to true and explain why "
+                                "in `message`."
+                            ),
+                        ),
+                        MaybeToolCall,
+                        stage=f"build arguments for the {name} tool",
+                    )
+                    step.tool = name
+                    if maybe.error or maybe.result is None:
+                        if maybe.message:
+                            failure_note = self._stringify(maybe.message)
+                        else:
+                            failure_note = "Tool call failed without an explanation."
+                        partial_payload = (
+                            self._stringify(maybe.result) if maybe.result else "None available"
+                        )
+                        failure_prompt = self._user_message(
+                            prompt,
+                            self._history_text(),
+                            f"Tool `{name}` reported an error.",
+                            f"Error message: {failure_note}",
+                            f"Partial payload: {partial_payload}",
+                            "Explain how this affects the plan and suggest a next step.",
+                        )
+                        observation = self._chat(
+                            failure_prompt,
+                            ObservationResponse,
+                            stage=f"explain the {name} tool failure",
+                        )
+                        step.result = observation.observation
+                        continue
+                    validated_args = spec.model_class()(**(maybe.result or {}))
+                    tool_output = spec.handler(validated_args.model_dump())
+                    step.result = self._chat(
+                        self._user_message(
+                            prompt,
+                            self._history_text(),
+                            f"You called `{name}`.",
+                            f"Tool args:\n{self._stringify(validated_args.model_dump())}",
+                            f"Tool output:\n{self._stringify(tool_output)}",
+                            "Summarize what this output means and how it affects the plan.",
+                        ),
+                        ObservationResponse,
+                        stage=f"interpret the {name} tool output",
+                    ).observation
 
-            if step.next_action == NextAction.FINAL_ANSWER and len(self._steps) >= self.min_steps:
-                break
+                if step.next_action == NextAction.FINAL_ANSWER and len(self._steps) >= self.min_steps:
+                    break
+        except LoopInterrupted:
+            pass
         if not self._steps:
             raise RuntimeError("No reasoning steps were produced.")
         if self._steps[-1].next_action != NextAction.FINAL_ANSWER:
