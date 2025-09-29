@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,6 +28,7 @@ class ReasoningStep(BaseModel):
     result: Optional[str] = Field(None, description="Outcome summary for the step.")
     reasoning: Optional[str] = Field(None, description="Why this step matters.")
     tool: Optional[str] = Field(None, description="Tool name when you need external help.")
+    tool_args: Optional[Dict[str, Any]] = Field(None, description="Arguments for the selected tool.")
     next_action: Optional[NextAction] = Field(None, description="continue, validate, final_answer, or reset.")
     confidence: Optional[float] = Field(None, description="Confidence score between 0.0 and 1.0.")
 
@@ -72,16 +73,7 @@ class ReasoningSteps(BaseModel):
     reasoning_steps: List[ReasoningStep] = Field(..., description="Ordered reasoning steps.")
 
 
-class MaybeToolCall(BaseModel):
-    """Structured tool call request returned by the LLM."""
-
-    result: Optional[Dict[str, Any]] = Field(default=None, description="Tool arguments when the call is valid.")
-    error: bool = Field(default=False, description="True when the tool call failed.")
-    message: Optional[Union[str, List[str]]] = Field(default=None, description="Explanation of what went wrong.")  # Accept list payloads returned as arrays.
-
-
 __all__ = [
-    "MaybeToolCall",
     "NextAction",
     "ReasoningStep",
     "ReasoningSteps",

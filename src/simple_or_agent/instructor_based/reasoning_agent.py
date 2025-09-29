@@ -28,7 +28,6 @@ from instructor.core.exceptions import (
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from simple_or_agent.instructor_based.reasoning_models import (
-    MaybeToolCall,
     NextAction,
     ReasoningStep,
     ReasoningSteps,
@@ -76,7 +75,8 @@ class ReasoningAgent:
         if catalog:
             base = (
                 f"{base}\n\nAvailable tools:\n{catalog}\n\n"
-                "Set the `tool` field only to one of these names."
+                "Set the `tool` field only to one of these names. Always include a `tool_args` JSON object that matches "
+                "the parameter hints shown above, and double-check each key before calling a tool."
             )
         return base
 
@@ -154,6 +154,7 @@ class ReasoningAgent:
             "response_model": response_model,
             "temperature": self.temperature,
             "extra_body": {"provider": {"require_parameters": True}},
+            "max_retries": 5,
         }
         try:
             return self.client.chat.completions.create(**payload)
@@ -214,46 +215,32 @@ class ReasoningAgent:
                         known = ", ".join(self._tools.tool_names()) or "no tools"
                         raise ValueError(f"Unknown tool '{name}'. Known tools: {known}")
                     spec = tools_map[name]
-                    maybe = self._chat(
-                        self._user_message(
-                            prompt,
-                            self._history_text(),
-                            (
-                                f"Return a MaybeToolCall JSON object for the `{name}` tool. "
-                                "Populate `result` with the exact arguments when the call is valid. "
-                                "If the call cannot proceed, set `error` to true and explain why "
-                                "in `message`."
-                            ),
-                        ),
-                        MaybeToolCall,
-                        stage=f"build arguments for the {name} tool",
-                    )
                     step.tool = name
-                    if maybe.error or maybe.result is None:
-                        if maybe.message:
-                            failure_note = self._stringify(maybe.message)
-                        else:
-                            failure_note = "Tool call failed without an explanation."
-                        partial_payload = (
-                            self._stringify(maybe.result) if maybe.result else "None available"
+                    raw_args = step.tool_args
+                    if raw_args is None:
+                        self._interrupt_with_error(
+                            f"prepare arguments for the {name} tool",
+                            ValueError("Tool call is missing the `tool_args` payload."),
                         )
-                        failure_prompt = self._user_message(
-                            prompt,
-                            self._history_text(),
-                            f"Tool `{name}` reported an error.",
-                            f"Error message: {failure_note}",
-                            f"Partial payload: {partial_payload}",
-                            "Explain how this affects the plan and suggest a next step.",
+                    if not isinstance(raw_args, dict):
+                        self._interrupt_with_error(
+                            f"prepare arguments for the {name} tool",
+                            TypeError("`tool_args` must be a JSON object."),
                         )
-                        observation = self._chat(
-                            failure_prompt,
-                            ObservationResponse,
-                            stage=f"explain the {name} tool failure",
+                    try:
+                        validated_args = spec.model_class()(**raw_args)
+                    except PydanticValidationError as exc:
+                        self._interrupt_with_error(
+                            f"validate arguments for the {name} tool",
+                            exc,
                         )
-                        step.result = observation.observation
-                        continue
-                    validated_args = spec.model_class()(**(maybe.result or {}))
-                    tool_output = spec.handler(validated_args.model_dump())
+                    try:
+                        tool_output = spec.handler(validated_args.model_dump())
+                    except Exception as exc:  # pragma: no cover - tool errors are surfaced to the model.
+                        self._interrupt_with_error(
+                            f"run the {name} tool",
+                            exc,
+                        )
                     step.result = self._chat(
                         self._user_message(
                             prompt,

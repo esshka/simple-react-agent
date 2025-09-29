@@ -18,14 +18,14 @@ import math
 import operator as op
 from typing import Any, Callable, Dict, List
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from simple_or_agent.instructor_based.tools import ToolSpec
 
 
 class Calculate(BaseModel):
     """Inputs for the calculator tool."""
-    expr: str
+    expr: str = Field(description="String expression, e.g. 'sqrt(log10(42))' or '10^(2.1)'. Use log, log10, ln, sqrt.")
 
 OPS = {
     ast.Add: op.add,
@@ -44,6 +44,11 @@ ALLOWED_FUNCS: Dict[str, Callable[..., float]] = {
     "sqrt": math.sqrt,
 }
 
+UNSUPPORTED_EXPRESSION_MESSAGE = (
+    "Unsupported expression. Use numbers, parentheses, +, -, *, /, ^ for powers, "
+    "the unary minus operator, and functions log, log10, ln, or sqrt with positional arguments only."
+)
+
 
 def _eval_expression(node: ast.AST) -> float:
     """Evaluate a safe arithmetic AST node."""
@@ -57,19 +62,19 @@ def _eval_expression(node: ast.AST) -> float:
         return OPS[type(node.op)](left, right)
     if isinstance(node, ast.Call):
         if node.keywords:
-            raise ValueError("Unsupported expression")
+            raise ValueError(UNSUPPORTED_EXPRESSION_MESSAGE)
         if not isinstance(node.func, ast.Name):
-            raise ValueError("Unsupported expression")
+            raise ValueError(UNSUPPORTED_EXPRESSION_MESSAGE)
         name = node.func.id
         func = ALLOWED_FUNCS.get(name)
         if func is None:
-            raise ValueError("Unsupported expression")
+            raise ValueError(UNSUPPORTED_EXPRESSION_MESSAGE)
         args: List[float] = [_eval_expression(arg) for arg in node.args]
         try:
             return float(func(*args))
         except TypeError as exc:
-            raise ValueError("Unsupported expression") from exc
-    raise ValueError("Unsupported expression")
+            raise ValueError(UNSUPPORTED_EXPRESSION_MESSAGE) from exc
+    raise ValueError(UNSUPPORTED_EXPRESSION_MESSAGE)
 
 
 def calculate(raw_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,10 +89,12 @@ def build_calculator_tool() -> ToolSpec:
     """Return the ToolSpec wired to the calculator handler."""
     return ToolSpec(
         name="calculate",
-        description="Evaluate a mathematical expression.",
+        description="Evaluate basic arithmetic with numbers, parentheses, +, -, *, /, ^ and safe math functions.",
         args_model=Calculate,
         handler=calculate,
-        parameters={"expr": "string expression to evaluate"},
+        parameters={
+            "expr": "String expression, e.g. 'sqrt(log10(42))' or '10^(2.1)'. Use log, log10, ln, sqrt."
+        },
     )
 
 

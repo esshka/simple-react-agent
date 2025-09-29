@@ -30,7 +30,7 @@ def get_system_prompt(min_steps: int = 1, max_steps: int = 10) -> str:
             - Considerations: Highlight key considerations, potential challenges, and mitigation strategies.
             - Progression: How this step logically follows from or builds upon previous actions.
             - Assumptions: Explicitly state any assumptions made and justify their validity.
-        5. **Tool**: When you need external data, set the `tool` field to the tool name listed in the prompt and leave `result` empty until the tool completes.
+        5. **Tool**: When you need external data, set the `tool` field to the tool name listed in the prompt, include a `tool_args` JSON object with the exact arguments, and leave `result` empty until the tool completes.
         6. **Next Action**: Clearly select your next step from:
             - **continue**: If further steps are needed.
             - **validate**: When you reach a potential answer, signaling it's ready for validation.

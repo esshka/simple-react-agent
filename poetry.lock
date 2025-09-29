@@ -516,6 +516,29 @@ files = [
 ]
 
 [[package]]
+name = "groq"
+version = "0.32.0"
+description = "The official Python library for the groq API"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "groq-0.32.0-py3-none-any.whl", hash = "sha256:0ed0be290042f8826f851f3a1defaac4f979dcfce86ec4a0681a23af00ec800b"},
+    {file = "groq-0.32.0.tar.gz", hash = "sha256:fb1ade61f47a06d1a1c1dc0fab690d269b799ebd57ad1dd867efaeaa7adeb2af"},
+]
+
+[package.dependencies]
+anyio = ">=3.5.0,<5"
+distro = ">=1.7.0,<2"
+httpx = ">=0.23.0,<1"
+pydantic = ">=1.9.0,<3"
+sniffio = "*"
+typing-extensions = ">=4.10,<5"
+
+[package.extras]
+aiohttp = ["aiohttp", "httpx-aiohttp (>=0.1.8)"]
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 description = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
@@ -1725,4 +1748,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4"
-content-hash = "c6ada77e7bcb06a87b9c86c1f2534c28d693abe5954e922fd7cd53f5453658ba"
+content-hash = "c242d70aa3ccf6e73491a4276230accf04f555e617e814af320b46485c72205f"
