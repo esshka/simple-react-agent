@@ -14,6 +14,10 @@ from pydantic import BaseModel, Field
 CLIENT = instructor.from_provider("openrouter/qwen/qwen3-next-80b-a3b-instruct")
 
 
+
+# TODO add planning and think tools 
+
+
 def search_web(query: str) -> str:
     """Return canned web search answers for demo purposes."""
     lowered = query.lower()
@@ -85,6 +89,7 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
         step: AgentAction = CLIENT.chat.completions.create(
             messages=messages,
             response_model=AgentAction,
+            extra_body={"provider": {"require_parameters": True}}
         )
 
         thought = step.thought
