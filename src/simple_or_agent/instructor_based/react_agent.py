@@ -4,14 +4,13 @@
 # RELEVANT FILES: src/simple_or_agent/instructor_based/reasoning_agent.py, src/simple_or_agent/instructor_based/calculator_tool.py, src/simple_or_agent/instructor_based/tools.py
 
 from __future__ import annotations
-from enum import Enum
-
-from typing import Callable, Dict, List, Union, Optional
+from typing import Any, Callable, Dict, List, Union, cast
 
 import instructor
 from pydantic import BaseModel, Field
 
 from reasoning_prompts import get_system_prompt
+from openai.types.chat import ChatCompletionMessageParam
 
 # Use the modern provider shortcut so the client matches current Instructor docs.
 CLIENT = instructor.from_provider("openrouter/qwen/qwen3-next-80b-a3b-instruct")
@@ -63,47 +62,54 @@ class AgentAction(BaseModel):
     action: Union[SearchTool, WeatherTool, FinalAnswerTool]
 
 
+class ThoughtResponse(BaseModel):
+    """Short reflection produced by the auxiliary thought agent."""
+
+    thought: str = Field(..., description="First-person reasoning text for the current step")
+
+
 _TOOL_MAP: Dict[type, Callable[..., str]] = {
     SearchTool: search_web,
     WeatherTool: get_weather,
 }
 
-class NextAction(str, Enum):
-    CONTINUE = "continue"
-    VALIDATE = "validate"
-    FINAL_ANSWER = "final_answer"
-    RESET = "reset"
+def generate_tought(
+    *,
+    topic: str,
+    query: str,
+    history: List[str],
+    action_name: str,
+    action_args: Dict[str, Any],
+) -> str:
+    """Create the text that fills the Thought stage using the latest context."""
 
-class ReasoningStep(BaseModel):
-    title: Optional[str] = Field(None, description="A concise title summarizing the step's purpose")
-    action: Optional[str] = Field(None, description="The action derived from this step. Talk in first person like I will ...")
-    result: Optional[str] = Field(None, description="The result of executing the action. Talk in first person like I did this and got ... ")
-    reasoning: Optional[str] = Field(None, description="The thought process and considerations behind this step")
-    next_action: Optional[NextAction] = Field(None, description="Indicates whether to continue reasoning, validate the provided result, or confirm that the result is the final answer")
-    confidence: Optional[float] = Field(None, description="Confidence score for this step (0.0 to 1.0)")
+    # Feed the thought agent grounded context so it mirrors the main loop faithfully.
+    history_text = "\n".join(history) if history else "No previous steps."
+    args_text = ", ".join(f"{key}={value}" for key, value in action_args.items()) if action_args else "no arguments"
+    user_payload = (
+        f"User query: {query}\n"
+        f"Thought topic: {topic}\n"
+        f"Planned action: {action_name}({args_text})\n"
+        f"History:\n{history_text}\n"
+        "Write the next Thought now."
+    )
 
-class ReasoningSteps(BaseModel):
-    reasoning_steps: List[ReasoningStep] = Field(..., description="A list of reasoning steps")
-
-def generate_tought(topic):
-    messages = [
-        {
-            "role": "system",
-            "content": get_system_prompt()
-        },
-        {
-            "role": "user",
-            "content": topic
-        }
+    raw_messages = [
+        {"role": "system", "content": get_system_prompt(mode="thought")},
+        {"role": "user", "content": user_payload},
     ]
+    messages = cast(List[ChatCompletionMessageParam], raw_messages)
 
-    tought = CLIENT.chat.completions.create(
+    thought_reply = cast(
+        ThoughtResponse,
+        CLIENT.chat.completions.create(
             messages=messages,
-            response_model=ReasoningSteps,
-            extra_body={"provider": {"require_parameters": True}}
-        )
-    
-    return tought
+            response_model=ThoughtResponse,
+            extra_body={"provider": {"require_parameters": True}},
+        ),
+    )
+
+    return thought_reply.thought.strip()
 
 
 def run_react_loop(query: str, max_steps: int = 10) -> str:
@@ -112,7 +118,7 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
 
     for _ in range(max_steps):
         # Keep the prompt simple: include the system framing plus the rolling history.
-        messages = [
+        raw_messages = [
             {
                 "role": "system",
                 "content": (
@@ -124,12 +130,16 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
             {"role": "user", "content": f"User query: {query}"},
             {"role": "system", "content": f"History:\n{'\n'.join(history)}"},
         ]
+        messages = cast(List[ChatCompletionMessageParam], raw_messages)
 
         # Ask Instructor to produce the next step, enforcing the AgentAction schema.
-        step: AgentAction = CLIENT.chat.completions.create(
-            messages=messages,
-            response_model=AgentAction,
-            extra_body={"provider": {"require_parameters": True}}
+        step = cast(
+            AgentAction,
+            CLIENT.chat.completions.create(
+                messages=messages,
+                response_model=AgentAction,
+                extra_body={"provider": {"require_parameters": True}},
+            ),
         )
 
         thought_topic = step.thought_topic
@@ -139,19 +149,26 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
             # Final hop: return the model's answer.
             return act.answer
 
+        payload = act.model_dump()
+        # Ask the auxiliary agent to expand the topic into the actual Thought text.
+        thought = generate_tought(
+            topic=thought_topic,
+            query=query,
+            history=history,
+            action_name=type(act).__name__,
+            action_args=payload,
+        )
+
         # Look up the correct tool handler by model type.
         handler = _TOOL_MAP.get(type(act))
         if handler is None:
             observation = f"Unknown tool: {type(act).__name__}"
         else:
-            payload = act.model_dump()
             observation = handler(**payload)
-
-        thought = generate_tought(thought_topic)
 
         # Record action + observation for the next turn so the model keeps context.
         history.append(f"Thought: {thought}")
-        history.append(f"Action: {type(act).__name__}({act.model_dump()})")
+        history.append(f"Action: {type(act).__name__}({payload})")
         history.append(f"Observation: {observation}")
 
         print(f"History: {history}")

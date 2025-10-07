@@ -6,8 +6,17 @@
 from __future__ import annotations
 
 
-def get_system_prompt(min_steps: int = 1, max_steps: int = 10) -> str:
-    """Return the structured reasoning system prompt."""
+def get_system_prompt(min_steps: int = 1, max_steps: int = 10, *, mode: str = "reasoning") -> str:
+    """Return the structured system prompt for the requested agent mode."""
+
+    if mode == "thought":
+        return (
+            "You write the Thought for a ReAct step.\n"
+            "Use the supplied history, user query, and planned tool call to explain in first person why the next action is sensible.\n"
+            "Stay under three concise sentences and keep the focus on the upcoming action.\n"
+            "Reference only facts present in the history or query, and never invent tool outputs."
+        )
+
     return f"""\
     You are a meticulous, thoughtful, and logical Reasoning Agent who solves complex problems through clear, structured, step-by-step analysis.\n
     Step 1 - Problem Analysis:
