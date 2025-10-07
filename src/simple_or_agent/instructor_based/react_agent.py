@@ -4,13 +4,15 @@
 # RELEVANT FILES: src/simple_or_agent/instructor_based/reasoning_agent.py, src/simple_or_agent/instructor_based/calculator_tool.py, src/simple_or_agent/instructor_based/tools.py
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Union, cast
+from typing import Any, Callable, Dict, List, Union, Optional
 
 import instructor
 from pydantic import BaseModel, Field
 
+from enum import Enum
+
+
 from reasoning_prompts import get_system_prompt
-from openai.types.chat import ChatCompletionMessageParam
 
 # Use the modern provider shortcut so the client matches current Instructor docs.
 CLIENT = instructor.from_provider("openrouter/qwen/qwen3-next-80b-a3b-instruct")
@@ -62,16 +64,83 @@ class AgentAction(BaseModel):
     action: Union[SearchTool, WeatherTool, FinalAnswerTool]
 
 
-class ThoughtResponse(BaseModel):
-    """Short reflection produced by the auxiliary thought agent."""
-
-    thought: str = Field(..., description="First-person reasoning text for the current step")
-
-
 _TOOL_MAP: Dict[type, Callable[..., str]] = {
     SearchTool: search_web,
     WeatherTool: get_weather,
 }
+
+
+def _summarize_action(action_name: str, action_args: Dict[str, Any]) -> str:
+    """Return a compact string that mirrors the exact tool call."""
+    if not action_args:
+        return f"{action_name}()"
+    formatted_args = ", ".join(f"{key}={value}" for key, value in action_args.items())
+    return f"{action_name}({formatted_args})"
+
+
+def _format_reasoning_outline(entries: List[Dict[str, str]]) -> str:
+    """Build a readable outline so we can inspect each reasoning hop quickly."""
+    if not entries:
+        return "Reasoning outline is empty."
+
+    lines: List[str] = ["Reasoning Outline"]
+    lines.append("------------------")
+    for entry in entries:
+        lines.append(f"Step {entry['step']}: {entry['topic']}")
+        lines.append(f"  Thought: {entry['thought']}")
+        lines.append(f"  Action: {entry['action']}")
+        lines.append(f"  Observation: {entry['observation']}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+class NextAction(str, Enum):
+    """Allowed directives emitted by the LLM."""
+
+    CONTINUE = "continue"
+    VALIDATE = "validate"
+    FINAL_ANSWER = "final_answer"
+    RESET = "reset"
+
+
+class ReasoningStep(BaseModel):
+    """Single reasoning step returned by the LLM."""
+
+    title: Optional[str] = Field(None, description="Short step title.")
+    action: Optional[str] = Field(None, description="Planned action written in first person.")
+    result: Optional[str] = Field(None, description="Outcome summary for the step.")
+    reasoning: Optional[str] = Field(None, description="Why this step matters.")
+    next_action: Optional[NextAction] = Field(None, description="continue, validate, final_answer, or reset.")
+    confidence: Optional[float] = Field(None, description="Confidence score between 0.0 and 1.0.")
+
+
+class ReasoningSteps(BaseModel):
+    """Ordered reasoning steps returned by the agent."""
+
+    reasoning_steps: List[ReasoningStep] = Field(..., description="Ordered reasoning steps.")
+
+
+def _format_thought_steps(steps: List[ReasoningStep]) -> str:
+    """Build a readable log that shows every step returned by the thought model."""
+    if not steps:
+        return "Thought agent returned no steps."
+
+    lines: List[str] = ["Thought Agent Steps"]
+    lines.append("-------------------")
+    for index, step in enumerate(steps, start=1):
+        title = step.title or f"Step {index}"
+        lines.append(f"{index}. {title}")
+        if step.reasoning:
+            lines.append(f"   Reasoning: {step.reasoning}")
+        if step.action:
+            lines.append(f"   Action: {step.action}")
+        if step.next_action:
+            lines.append(f"   Next Action: {step.next_action.value}")
+        if step.confidence is not None:
+            lines.append(f"   Confidence: {step.confidence}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
 
 def generate_tought(
     *,
@@ -94,31 +163,37 @@ def generate_tought(
         "Write the next Thought now."
     )
 
-    raw_messages = [
-        {"role": "system", "content": get_system_prompt(mode="thought")},
+    messages = [
+        {"role": "system", "content": get_system_prompt(min_steps=1, max_steps=1, mode="thought")},
         {"role": "user", "content": user_payload},
     ]
-    messages = cast(List[ChatCompletionMessageParam], raw_messages)
+   
 
-    thought_reply = cast(
-        ThoughtResponse,
-        CLIENT.chat.completions.create(
+    thought_reply = CLIENT.chat.completions.create(
             messages=messages,
-            response_model=ThoughtResponse,
+            response_model=ReasoningSteps,
             extra_body={"provider": {"require_parameters": True}},
-        ),
-    )
+        )
 
-    return thought_reply.thought.strip()
+    steps = thought_reply.reasoning_steps
+    print(_format_thought_steps(steps))
+    print("")
+    if not steps:
+        return "No structured reasoning returned."
+
+    # Fall back to the richest step field so the loop always records a thought.
+    final_step = steps[-1]
+    return final_step.reasoning or final_step.action or ""
 
 
 def run_react_loop(query: str, max_steps: int = 10) -> str:
     """Run the ReAct loop until the agent returns a final answer."""
     history: List[str] = []
+    reasoning_outline: List[Dict[str, str]] = []
 
     for _ in range(max_steps):
         # Keep the prompt simple: include the system framing plus the rolling history.
-        raw_messages = [
+        messages = [
             {
                 "role": "system",
                 "content": (
@@ -130,17 +205,14 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
             {"role": "user", "content": f"User query: {query}"},
             {"role": "system", "content": f"History:\n{'\n'.join(history)}"},
         ]
-        messages = cast(List[ChatCompletionMessageParam], raw_messages)
+        
 
         # Ask Instructor to produce the next step, enforcing the AgentAction schema.
-        step = cast(
-            AgentAction,
-            CLIENT.chat.completions.create(
+        step = CLIENT.chat.completions.create(
                 messages=messages,
                 response_model=AgentAction,
                 extra_body={"provider": {"require_parameters": True}},
-            ),
-        )
+            )
 
         thought_topic = step.thought_topic
         act = step.action
@@ -150,6 +222,7 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
             return act.answer
 
         payload = act.model_dump()
+        action_summary = _summarize_action(type(act).__name__, payload)
         # Ask the auxiliary agent to expand the topic into the actual Thought text.
         thought = generate_tought(
             topic=thought_topic,
@@ -168,10 +241,21 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
 
         # Record action + observation for the next turn so the model keeps context.
         history.append(f"Thought: {thought}")
-        history.append(f"Action: {type(act).__name__}({payload})")
+        history.append(f"Action: {action_summary}")
         history.append(f"Observation: {observation}")
 
-        print(f"History: {history}")
+        # Keep a separate outline printout so we can read the complete reasoning easily.
+        reasoning_outline.append(
+            {
+                "step": str(len(reasoning_outline) + 1),
+                "topic": thought_topic,
+                "thought": thought,
+                "action": action_summary,
+                "observation": observation,
+            }
+        )
+        print(_format_reasoning_outline(reasoning_outline))
+        print("")
 
     return "Max steps reached before final answer."
 
