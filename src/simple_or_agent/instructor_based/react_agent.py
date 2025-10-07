@@ -4,11 +4,14 @@
 # RELEVANT FILES: src/simple_or_agent/instructor_based/reasoning_agent.py, src/simple_or_agent/instructor_based/calculator_tool.py, src/simple_or_agent/instructor_based/tools.py
 
 from __future__ import annotations
+from enum import Enum
 
-from typing import Callable, Dict, List, Union
+from typing import Callable, Dict, List, Union, Optional
 
 import instructor
 from pydantic import BaseModel, Field
+
+from reasoning_prompts import get_system_prompt
 
 # Use the modern provider shortcut so the client matches current Instructor docs.
 CLIENT = instructor.from_provider("openrouter/qwen/qwen3-next-80b-a3b-instruct")
@@ -56,7 +59,7 @@ class FinalAnswerTool(BaseModel):
 class AgentAction(BaseModel):
     """Structured Thought → Action payload enforced by Instructor."""
 
-    thought: str = Field(..., description="Reasoning that motivates the next step")
+    thought_topic: str = Field(..., description="Topic of the thought. What do I need to think about?")
     action: Union[SearchTool, WeatherTool, FinalAnswerTool]
 
 
@@ -64,6 +67,43 @@ _TOOL_MAP: Dict[type, Callable[..., str]] = {
     SearchTool: search_web,
     WeatherTool: get_weather,
 }
+
+class NextAction(str, Enum):
+    CONTINUE = "continue"
+    VALIDATE = "validate"
+    FINAL_ANSWER = "final_answer"
+    RESET = "reset"
+
+class ReasoningStep(BaseModel):
+    title: Optional[str] = Field(None, description="A concise title summarizing the step's purpose")
+    action: Optional[str] = Field(None, description="The action derived from this step. Talk in first person like I will ...")
+    result: Optional[str] = Field(None, description="The result of executing the action. Talk in first person like I did this and got ... ")
+    reasoning: Optional[str] = Field(None, description="The thought process and considerations behind this step")
+    next_action: Optional[NextAction] = Field(None, description="Indicates whether to continue reasoning, validate the provided result, or confirm that the result is the final answer")
+    confidence: Optional[float] = Field(None, description="Confidence score for this step (0.0 to 1.0)")
+
+class ReasoningSteps(BaseModel):
+    reasoning_steps: List[ReasoningStep] = Field(..., description="A list of reasoning steps")
+
+def generate_tought(topic):
+    messages = [
+        {
+            "role": "system",
+            "content": get_system_prompt()
+        },
+        {
+            "role": "user",
+            "content": topic
+        }
+    ]
+
+    tought = CLIENT.chat.completions.create(
+            messages=messages,
+            response_model=ReasoningSteps,
+            extra_body={"provider": {"require_parameters": True}}
+        )
+    
+    return tought
 
 
 def run_react_loop(query: str, max_steps: int = 10) -> str:
@@ -92,7 +132,7 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
             extra_body={"provider": {"require_parameters": True}}
         )
 
-        thought = step.thought
+        thought_topic = step.thought_topic
         act = step.action
 
         if isinstance(act, FinalAnswerTool):
@@ -106,6 +146,8 @@ def run_react_loop(query: str, max_steps: int = 10) -> str:
         else:
             payload = act.model_dump()
             observation = handler(**payload)
+
+        thought = generate_tought(thought_topic)
 
         # Record action + observation for the next turn so the model keeps context.
         history.append(f"Thought: {thought}")
